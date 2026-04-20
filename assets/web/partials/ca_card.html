@@ -1,0 +1,40 @@
+<div class="card" id="ca-card">
+  <div class="section-title" style="font-size:18px">{{ca.title}}</div>
+  <div class="settings-group">
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">{{ca.cert.label}}</div>
+        <div class="setting-note">{{ca.cert.note}}</div>
+      </div>
+      <div id="ca-cert-path" class="mono">__CA_CERT__</div>
+      <div></div>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">{{ca.key.label}}</div>
+        <div class="setting-note">{{ca.key.note}}</div>
+      </div>
+      <div id="ca-key-path" class="mono">__CA_KEY__</div>
+      <div></div>
+    </div>
+    <div class="setting-row">
+      <div>
+        <div class="setting-label">{{ca.trust.label}}</div>
+        <div class="setting-note">{{ca.trust.note}}</div>
+      </div>
+      <div id="ca-trust-state">__CA_TRUST__</div>
+      <div>
+        <button class="btn soft"
+                rg-post="/backend/actions/create-ca"
+                rg-target="#ca-feedback"
+                rg-swap="innerHTML">{{ca.trust.install}}</button>
+        <button class="btn danger"
+                rg-post="/backend/actions/remove-ca-trust"
+                rg-target="#ca-feedback"
+                rg-swap="innerHTML"
+                style="margin-left:8px">{{ca.trust.remove}}</button>
+      </div>
+    </div>
+  </div>
+  <div id="ca-feedback" class="feedback">__CA_FEEDBACK__</div>
+</div>

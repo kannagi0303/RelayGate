@@ -1,0 +1,43 @@
+[package]
+name = "relaygate"
+version = "0.1.0"
+edition = "2021"
+description = "A local proxy application for Windows."
+license = "MPL-2.0"
+default-run = "relaygate"
+
+[[bin]]
+name = "relaygate-portable"
+path = "src/bin/portable.rs"
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "charset", "http2"] }
+adblock = { version = "0.12", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["full"] }
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"
+tray-icon = "0.19"
+windows-sys = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Foundation", "Win32_System_Threading", "Win32_Security"] }
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+sha1 = "0.10"
+lol_html = "2"
+scraper = "0.24"
+regex = "1"
+url = "2"
+async-stream = "0.3"
+futures-core = "0.3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+ico = "0.4"
+
+[build-dependencies]
+winres = "0.1"

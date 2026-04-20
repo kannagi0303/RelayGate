@@ -1,0 +1,39 @@
+<h2 class="section-title">{{nav.adblock}}</h2>
+<p class="section-subtitle">{{{adblock.page.sub}}}</p>
+
+<div class="grid">
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{adblock.feature}}</div>
+    <div class="settings-group">
+      __ADBLOCK_MODE_ROW__
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">{{adblock.update.label}}</div>
+          <div class="setting-note">{{adblock.update.note}}</div>
+        </div>
+        <div class="mono">{{adblock.update.auto}}</div>
+        <div>
+          <button class="btn"
+                  rg-post="/backend/actions/update-adblock-lists"
+                  rg-target="#adblock-feedback"
+                  rg-swap="innerHTML">{{adblock.update.now}}</button>
+        </div>
+      </div>
+    </div>
+    <div id="adblock-feedback" class="feedback"></div>
+  </div>
+
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{adblock.rules.label}}</div>
+    <div class="section-subtitle">{{{adblock.rules.sub}}}</div>
+    <table style="margin-top:12px">
+      <tr><th>{{common.file}}</th><th>{{common.size}}</th></tr>
+      <tbody id="adblock-rule-files"></tbody>
+    </table>
+    <div class="section-title" style="font-size:18px; margin-top:16px">{{adblock.resources.label}}</div>
+    <table style="margin-top:12px">
+      <tr><th>{{common.file}}</th><th>{{common.size}}</th></tr>
+      <tbody id="adblock-resource-files"></tbody>
+    </table>
+  </div>
+</div>

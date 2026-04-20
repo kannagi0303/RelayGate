@@ -1,0 +1,34 @@
+app:
+  name: RelayGate
+proxy:
+  listen: 0.0.0.0:8787
+  mitm:
+    enabled: true
+    tolerate_invalid_upstream_cert_hosts: []
+  adblock:
+    enabled: true
+    mode: aggressive
+    auto_update: true
+web:
+  listen: 0.0.0.0:8788
+  open_browser_on_launch: false
+tray:
+  enabled: true
+traffic:
+  enabled: true
+  max_queue_per_host: 32
+  initial_cooldown_secs: 3
+  initial_release_interval_secs: 3
+  min_cooldown_secs: 3
+  max_cooldown_secs: 30
+  min_release_interval_secs: 3
+  max_release_interval_secs: 15
+  auto_adjust_step_secs: 1
+  auto_relax_after_successes: 20
+  internal_retry_limit: 2
+logging:
+  log_response_body: false
+gateway:
+  mounts: []
+upstreams: []
+rules: []

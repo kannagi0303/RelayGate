@@ -1,0 +1,218 @@
+meta:
+  locale: zh-TW
+  name: 繁體中文
+  version: 1
+
+common:
+  none: 無
+  yes: 是
+  no: 否
+  enabled: 已啟用
+  disabled: 已停用
+  auto: 自動
+  save: 儲存
+  item: 項目
+  value: 值
+  desc: 說明
+  file: 檔名
+  size: 大小
+  bytes: bytes
+  status: 狀態
+  proxy: Proxy
+  web: Web
+  host: Host
+  cooldown: Cooldown
+  direction: 方向
+  example: 範例
+  duty: 責任
+  model: 資料模型
+  rule: 原則
+  latest: 最近狀態
+  learned: 學習值
+
+app:
+  title: 設定
+  hint: 本地設定頁 v1。先偏重狀態觀察與單項設定。
+  online: 已連線
+  offline: 已離線
+
+nav:
+  system: 系統
+  core: 核心
+  content: 內容過濾
+  status: 狀態
+  settings: 設定
+  traffic: 調度
+  patch: 修補
+  render: 重構
+  adblock: Adblock
+
+tray:
+  open: 開啟控制台
+  reload: 重新讀取
+  exit: 結束
+
+settings:
+  app_name:
+    label: 應用名稱
+    note: 顯示在 web 頁與 tray 相關位置。
+  proxy:
+    label: Proxy 位址
+    note: 修改後需之後接熱套用或重啟。
+  web:
+    label: Web 位址
+    note: 修改後目前不會即時重綁定 listener。
+  adblock:
+    label: 追蹤器與廣告封鎖
+    note: 模式語義對齊 Brave：標準模式不對 first-party request 做 network-level filter blocking；積極模式會連 first-party 也一起擋。
+  tray:
+    label: Tray 啟用
+
+adblock:
+  mode:
+    off: 已停用
+    std: 標準
+    agg: 積極
+  page:
+    sub: 這一頁現在改成對齊 Brave 的操作方式：`已停用 / 標準 / 積極` 三段模式，清單與資源會在背景自動同步 Brave 預設來源；按下手動更新時，也會立刻下載並直接重載套用。
+  feature: 功能狀態
+  update:
+    label: 規則更新
+    note: 背景會自動同步 Brave 的預設 lists / resources。若想立即刷新，可直接按手動更新。
+    auto: 自動
+    now: 手動更新
+  rules:
+    label: 規則來源
+    sub: 目前已載入 <strong id="adblock-rule-count">0</strong> 條規則，以及 <strong id="adblock-resource-count">0</strong> 份資源。模式差異會直接影響請求是否要像 Brave 一樣連 first-party 也一起擋：`標準` 偏保守，`積極` 會更接近 Brave Aggressive。
+    none: 目前沒有規則檔。請先下載預設規則，或手動放入 `.txt` / `.list` / `.filter` / `.filters` 檔案。
+  resources:
+    label: 資源檔
+    none: 目前沒有 resources.json。redirect / scriptlet 資源尚未載入。
+
+status_page:
+  title: 狀態
+  sub: 這一頁目前偏向看全域狀態與已載入能力，不再維持近期連線追蹤。
+  mitm: 中介
+  rewrite: 網站改寫
+  adblock: Adblock
+  summary: 系統摘要
+  upstreams: 上游
+  rules: 代理規則
+
+settings_page:
+  title: 設定
+  sub: 這一版先偏單項單項編輯。儲存時會直接改寫 `relaygate.yaml`。
+  basic: 基本設定
+  actions:
+    title: 操作
+    sub: 現階段先提供安全且常用的操作。重啟先不做。
+    reload_rules: 重讀 Rewrite 規則
+    reload_config: 重讀設定檔
+    exit: 結束 RelayGate
+
+traffic_page:
+  title: 調度
+  sub: 這裡之後會承接同站請求調度、429 cooldown、queue 與 retry 類設定。這一頁目前先作為獨立分區骨架。
+  mode: 模式
+  active: 執行中請求
+  queued: 排隊中請求
+  cooling: 冷卻中 host
+  strategy: 第一版策略
+  cooldown: 初始 cooldown
+  interval: 初始放行間隔
+  max_queue: 每 host 佇列上限
+  hosts: 受控 host 數量
+  position: 定位
+  host:
+    title: Host 狀態
+    in_flight: 執行中
+    queued: 排隊中
+    latest: 最近狀態
+    learned: 學習值
+    none: 目前尚無調度資料。
+
+patch_page:
+  title: 修補
+  sub: 這裡承接 upstream response 的局部修補，例如 JSON key 清理、HTML 內 JS 變數值回寫、header 調整。
+  current: 目前方向
+  path: 規則路徑
+  cases: 已驗證案例
+
+render_page:
+  title: 重構
+  sub: 這裡維持 extract -> render 的定位，適合像 onejav 這種抽資料後重建輸出的站點。
+  current: 目前方向
+  path: 規則路徑
+
+ca:
+  title: CA 憑證
+  cert:
+    label: 憑證位置
+    note: 目前使用中的 RelayGate CA 憑證路徑。
+  key:
+    label: 私鑰位置
+    note: 目前使用中的 RelayGate CA 私鑰路徑。
+  trust:
+    label: Windows 信任
+    note: 目前使用者的 Root store 是否仍信任這張 CA。
+    install: 安裝 CA 到 Windows
+    remove: 解除信任 CA
+
+backend:
+  reload:
+    adblock_fail: "重讀 Adblock 規則失敗：{error}"
+    rules_ok: "Rewrite 規則已重讀，目前載入 {rule_count} 份；Adblock 規則已載入 {adblock_rule_count} 條，資源已載入 {adblock_resource_count} 份。"
+    rules_fail: "重讀 rewrite 規則失敗：{error}"
+  config:
+    adblock_fail: "設定檔已讀入，但 Adblock 規則重載失敗：{error}"
+    ok: 設定檔已重新讀取並套用到控制台記憶體狀態。執行中的 listener 與核心行為仍需未來再接熱套用。
+    fail: "設定檔重新讀取失敗：{error}"
+  sync:
+    reload_fail: "規則已同步，但重載失敗：{error}"
+    ok: "已同步 Brave 預設 lists / resources：{files}，目前共載入 {rule_count} 條規則與 {resource_count} 份資源。"
+    fail: "同步 Brave 規則失敗：{error}"
+  ca:
+    ok: 已完成本地 CA 準備，並已安裝到 Windows 信任根。
+    unverified: 安裝動作已執行，但目前仍未在 Windows 信任根中確認到這張 CA。
+    fail: "安裝 CA 到 Windows 失敗：{error}"
+    remove_fail: "解除信任 CA 失敗：{error}"
+    no_cert: 目前沒有本地 CA 憑證檔，無法解除信任。
+    no_diag: 無法取得額外診斷
+    kept: 已從 Windows 信任根解除 RelayGate CA，本地 CA 檔案仍保留。
+    thumb_fail: "無法讀取本地 CA thumbprint：{stderr}"
+    still:
+      diag: "CA 仍存在於：{path}；診斷：{details}"
+      result: "CA 仍存在於：{path}；處理結果：{result}；診斷：{details}"
+      remove: "CA 仍存在於：{path}；處理結果：{result}；移除細節：{remove_details}；診斷：{details}"
+      store: "{store_label} 移除後仍有殘留（{stdout}）"
+  exit:
+    ok: 已送出結束要求，RelayGate 即將關閉。
+  save:
+    fail: "儲存失敗：{error}"
+    ok: "已儲存 {setting}。"
+
+traffic:
+  mode:
+    auto: 自動
+    none: 無
+  host:
+    none: 尚無
+    throttling: 節流中
+    pass: 直通
+  text:
+    status: 處理 request admission、節流、排隊、延後重試與同站放行策略。
+    example: 當某站回傳 429 時，暫停同站後續請求一段時間，之後再由 proxy 逐步放行。
+    direction: 獨立於修補與重構，不與 response content rewrite 混在一起。
+  wait:
+    title: RelayGate Waiting
+    message: "RelayGate 正在排隊並重試：{url}"
+
+patch:
+  text:
+    model: 目前已開始支援 vars 與 json 兩段，並以 pipe 做最小處理。
+    example: YouTube 已改由 patch YAML 驅動，不再只靠 MITM 硬寫函式。
+
+render:
+  text:
+    duty: 根據 URL 命中規則，抽取資料並套入模板，輸出新的頁面內容。
+    rule: 不擴成萬能 rewrite engine，與修補分責。

@@ -1,0 +1,14 @@
+<form class="setting-row"
+  rg-post="/backend/actions/update-setting"
+  rg-target="#settings-feedback"
+  rg-swap="innerHTML">
+  <div>
+    <div class="setting-label">__LABEL__</div>
+    <div class="setting-note">__NOTE__</div>
+  </div>
+  <div>
+    <input type="hidden" name="key" value="__KEY__">
+    <input type="text" __INPUT_ID_ATTR__ name="value" value="__VALUE__">
+  </div>
+  <div><button class="btn" type="submit">{{common.save}}</button></div>
+</form>

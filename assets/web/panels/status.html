@@ -1,0 +1,38 @@
+<div data-session-id="">
+  <h2 class="section-title">{{status_page.title}}</h2>
+  <p class="section-subtitle">{{status_page.sub}}</p>
+
+  <div class="grid">
+    <div class="stat-grid">
+      <div class="stat">
+        <div class="stat-label">{{common.proxy}}</div>
+        <div id="status-proxy-listen" class="stat-value mono"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">{{common.web}}</div>
+        <div id="status-web-listen" class="stat-value mono"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">{{status_page.mitm}}</div>
+        <div id="status-mitm-mode" class="stat-value"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">{{status_page.rewrite}}</div>
+        <div id="status-rewrite-rule-count" class="stat-value"></div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">{{status_page.adblock}}</div>
+        <div id="status-adblock-summary" class="stat-value"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-title" style="font-size:18px">{{status_page.summary}}</div>
+      <table>
+        <tr><th>{{common.item}}</th><th>{{common.value}}</th></tr>
+        <tr><td>{{status_page.upstreams}}</td><td id="status-upstreams-value"></td></tr>
+        <tr><td>{{status_page.rules}}</td><td id="status-rule-count"></td></tr>
+      </table>
+    </div>
+  </div>
+</div>

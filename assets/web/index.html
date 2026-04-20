@@ -1,0 +1,754 @@
+<!doctype html>
+<html lang="__HTML_LANG__">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title id="page-title">__PAGE_TITLE__</title>
+  <link rel="icon" href="/backend/assets/favicon.ico" sizes="any">
+  <script src="/backend/assets/relaygate-actions.js"></script>
+  <style>
+    :root {
+      --bg: #f3efe7;
+      --paper: #fffaf1;
+      --ink: #1d1a17;
+      --muted: #6a6157;
+      --line: #d8cfbf;
+      --accent: #1f6f5f;
+      --accent-2: #ead7b7;
+      --danger: #8f3b2f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(31,111,95,.10), transparent 28%),
+        linear-gradient(180deg, #f8f3ea 0%, var(--bg) 100%);
+      font-family: "Noto Sans TC", "Segoe UI", sans-serif;
+    }
+    .shell {
+      width: min(1260px, 100%);
+      margin: 0 auto;
+      padding: 24px;
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 24px;
+    }
+    .nav, .panel {
+      background: rgba(255,250,241,0.92);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 50px rgba(37, 28, 16, 0.08);
+    }
+    .nav {
+      padding: 18px;
+      position: sticky;
+      top: 20px;
+      align-self: start;
+    }
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .live-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      padding: 0 10px;
+      margin-bottom: 16px;
+      border: 1px solid var(--line);
+      background: #fcf8ef;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .live-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #9d9588;
+    }
+    .live-status.online .live-dot {
+      background: #1f6f5f;
+      box-shadow: 0 0 0 4px rgba(31,111,95,.12);
+    }
+    .live-status.offline .live-dot {
+      background: #8f3b2f;
+      box-shadow: 0 0 0 4px rgba(143,59,47,.12);
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 18px;
+    }
+    .nav button {
+      width: 100%;
+      text-align: left;
+      border: 0;
+      background: transparent;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      color: var(--ink);
+      font-size: 15px;
+    }
+    .nav button.active {
+      background: var(--accent);
+      color: white;
+    }
+    .nav-sep {
+      height: 1px;
+      background: var(--line);
+      margin: 14px 0;
+    }
+    .nav-group-label {
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      margin: 0 0 10px;
+      padding: 0 6px;
+    }
+    .panel {
+      padding: 22px;
+    }
+    .section-title {
+      margin: 0 0 6px;
+      font-size: 24px;
+    }
+    .section-subtitle {
+      margin: 0 0 20px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      background: var(--paper);
+      padding: 16px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 7px 8px;
+      vertical-align: top;
+      text-align: left;
+    }
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      background: #fcf8ef;
+      border: 1px solid var(--line);
+      padding: 14px;
+    }
+    .mode-text {
+      font-weight: 600;
+    }
+    .mode-text.tunnel {
+      color: #205747;
+    }
+    .mode-text.mitm {
+      color: #885317;
+    }
+    .mode-text.forward {
+      color: #2a568b;
+    }
+    .stat-label {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 6px;
+    }
+    .stat-value {
+      font-size: 19px;
+      font-weight: 700;
+    }
+    .settings-group {
+      display: grid;
+      gap: 12px;
+    }
+    .setting-row {
+      display: grid;
+      grid-template-columns: 220px 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-label {
+      font-weight: 600;
+    }
+    .setting-note {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    input[type="text"], select {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid #c8bea8;
+      background: white;
+      padding: 8px 10px;
+      font-size: 14px;
+    }
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 52px;
+      height: 30px;
+    }
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .switch-slider {
+      position: absolute;
+      inset: 0;
+      cursor: pointer;
+      background: #cabfae;
+      transition: .2s ease;
+      border-radius: 999px;
+    }
+    .switch-slider:before {
+      content: "";
+      position: absolute;
+      height: 22px;
+      width: 22px;
+      left: 4px;
+      top: 4px;
+      background: #fffaf1;
+      transition: .2s ease;
+      border-radius: 999px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.16);
+    }
+    .switch input:checked + .switch-slider {
+      background: var(--accent);
+    }
+    .switch input:checked + .switch-slider:before {
+      transform: translateX(22px);
+    }
+    .toggle-state {
+      color: var(--muted);
+      font-size: 13px;
+      min-width: 48px;
+      text-align: right;
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      min-height: 40px;
+      border: 0;
+      background: var(--accent);
+      color: white;
+      padding: 0 14px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    .btn.soft {
+      background: var(--accent-2);
+      color: var(--ink);
+    }
+    .btn.danger {
+      background: var(--danger);
+    }
+    .feedback {
+      min-height: 24px;
+      font-size: 13px;
+      color: var(--muted);
+      margin-top: 12px;
+    }
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+    }
+    @media (max-width: 980px) {
+      .shell {
+        grid-template-columns: 1fr;
+      }
+      .nav {
+        position: static;
+      }
+      .stat-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .setting-row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="nav">
+      <div id="app-brand" class="brand">__APP_NAME__</div>
+      <div id="live-status" class="live-status offline">
+        <span class="live-dot"></span>
+        <span id="live-status-text">{{app.offline}}</span>
+      </div>
+      <div class="hint">{{app.hint}}</div>
+      <div class="nav-group-label">{{nav.system}}</div>
+      <button id="tab-status" class="active" type="button" onclick="showTab('status')">{{nav.status}}</button>
+      <button id="tab-settings" type="button" onclick="showTab('settings')">{{nav.settings}}</button>
+      <div class="nav-sep"></div>
+      <div class="nav-group-label">{{nav.core}}</div>
+      <button id="tab-traffic" type="button" onclick="showTab('traffic')">{{nav.traffic}}</button>
+      <button id="tab-patch" type="button" onclick="showTab('patch')">{{nav.patch}}</button>
+      <button id="tab-render" type="button" onclick="showTab('render')">{{nav.render}}</button>
+      <div class="nav-sep"></div>
+      <div class="nav-group-label">{{nav.content}}</div>
+      <button id="tab-adblock" type="button" onclick="showTab('adblock')">{{nav.adblock}}</button>
+    </aside>
+    <main>
+      <section id="panel-status" class="panel">
+        <div id="status-fragment">__STATUS_PANEL__</div>
+      </section>
+      <section id="panel-settings" class="panel" style="display:none">
+        <div id="settings-fragment">__SETTINGS_PANEL__</div>
+      </section>
+      <section id="panel-traffic" class="panel" style="display:none">
+        <div id="traffic-fragment">__TRAFFIC_PANEL__</div>
+      </section>
+      <section id="panel-patch" class="panel" style="display:none">
+        <div id="patch-fragment">__PATCH_PANEL__</div>
+      </section>
+      <section id="panel-render" class="panel" style="display:none">
+        <div id="render-fragment">__RENDER_PANEL__</div>
+      </section>
+      <section id="panel-adblock" class="panel" style="display:none">
+        <div id="adblock-fragment">__ADBLOCK_PANEL__</div>
+      </section>
+    </main>
+  </div>
+  <script>
+    let relaygateSessionId = __SESSION_ID__;
+    let liveStatus = document.getElementById('live-status');
+    let liveStatusText = document.getElementById('live-status-text');
+    let statusPanel = document.getElementById('panel-status');
+    let settingsPanel = document.getElementById('panel-settings');
+    let trafficPanel = document.getElementById('panel-traffic');
+    let patchPanel = document.getElementById('panel-patch');
+    let renderPanel = document.getElementById('panel-render');
+    let adblockPanel = document.getElementById('panel-adblock');
+    let tabStatus = document.getElementById('tab-status');
+    let tabSettings = document.getElementById('tab-settings');
+    let tabTraffic = document.getElementById('tab-traffic');
+    let tabPatch = document.getElementById('tab-patch');
+    let tabRender = document.getElementById('tab-render');
+    let tabAdblock = document.getElementById('tab-adblock');
+    let backendSourceState = { stream: null, reconnectTimer: null };
+    let latestBackendPayload = null;
+    let activeTab = 'status';
+
+    function setLiveStatus(mode, text) {
+      if (liveStatus) {
+        liveStatus.classList.remove('online', 'offline');
+        liveStatus.classList.add(mode);
+      }
+      if (liveStatusText) {
+        liveStatusText.textContent = text;
+      }
+    }
+
+    function parseJsonEventData(event) {
+      if (!event || !event.data) {
+        return null;
+      }
+
+      try {
+        return JSON.parse(event.data);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function updateText(id, value) {
+      const node = document.getElementById(id);
+      if (node) {
+        node.textContent = value == null ? '' : String(value);
+      }
+    }
+
+    function clearChildren(node) {
+      if (!node) {
+        return;
+      }
+
+      while (node.firstChild) {
+        node.removeChild(node.firstChild);
+      }
+    }
+
+    function appendDivText(container, text) {
+      const row = document.createElement('div');
+      row.textContent = text;
+      container.appendChild(row);
+    }
+
+    function updateStatusView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      updateText('status-proxy-listen', payload.proxy_listen);
+      updateText('status-web-listen', payload.web_listen);
+      updateText('status-mitm-mode', payload.mitm_mode);
+      updateText('status-rewrite-rule-count', payload.rewrite_rule_count);
+      updateText(
+        'status-adblock-summary',
+        payload.adblock_mode_label + ' / ' + payload.adblock_rule_count + ' / ' + payload.adblock_resource_count
+      );
+      updateText('status-rule-count', payload.rule_count);
+
+      const upstreamsValue = document.getElementById('status-upstreams-value');
+      if (upstreamsValue) {
+        clearChildren(upstreamsValue);
+        appendDivText(upstreamsValue, String(payload.upstream_count));
+
+        if (payload.upstreams && payload.upstreams.length > 0) {
+          const details = document.createElement('div');
+          details.style.marginTop = '6px';
+          details.style.paddingLeft = '16px';
+          details.style.color = '#6a6157';
+          payload.upstreams.forEach(function(item) {
+            appendDivText(details, item);
+          });
+          upstreamsValue.appendChild(details);
+        }
+      }
+    }
+
+    function renderFileRows(targetId, files, emptyText) {
+      const tbody = document.getElementById(targetId);
+      if (!tbody) {
+        return;
+      }
+
+      clearChildren(tbody);
+
+      if (!files || files.length === 0) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 2;
+        cell.textContent = emptyText;
+        row.appendChild(cell);
+        tbody.appendChild(row);
+        return;
+      }
+
+      files.forEach(function(file) {
+        const row = document.createElement('tr');
+        const nameCell = document.createElement('td');
+        nameCell.className = 'mono';
+        nameCell.textContent = file.name;
+        const sizeCell = document.createElement('td');
+        sizeCell.textContent = String(file.size) + ' ' + __COMMON_BYTES_JSON__;
+        row.appendChild(nameCell);
+        row.appendChild(sizeCell);
+        tbody.appendChild(row);
+      });
+    }
+
+    function updateAdblockView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      const modeSelect = document.getElementById('adblock-mode-select');
+      if (modeSelect) {
+        modeSelect.value = payload.mode_value;
+      }
+
+      updateText('adblock-rule-count', payload.rule_count);
+      updateText('adblock-resource-count', payload.resource_count);
+
+      renderFileRows(
+        'adblock-rule-files',
+        payload.files,
+        __ADBLOCK_RULES_NONE_JSON__
+      );
+      renderFileRows(
+        'adblock-resource-files',
+        payload.resource_files,
+        __ADBLOCK_RESOURCES_NONE_JSON__
+      );
+    }
+
+    function updateSettingsView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      const appBrand = document.getElementById('app-brand');
+      const appNameInput = document.getElementById('settings-app-name-input');
+      const proxyListenInput = document.getElementById('settings-proxy-listen-input');
+      const webListenInput = document.getElementById('settings-web-listen-input');
+
+      if (appBrand) {
+        appBrand.textContent = payload.app_name || '';
+      }
+      if (payload.app_name) {
+        document.title = payload.app_name + ' ' + __APP_TITLE_JSON__;
+      }
+
+      if (appNameInput) {
+        appNameInput.value = payload.app_name || '';
+      }
+      if (proxyListenInput) {
+        proxyListenInput.value = payload.proxy_listen || '';
+      }
+      if (webListenInput) {
+        webListenInput.value = payload.web_listen || '';
+      }
+
+      updateText('ca-cert-path', payload.mitm && payload.mitm.ca_cert_exists ? payload.mitm.ca_cert_path : __COMMON_NONE_JSON__);
+      updateText('ca-key-path', payload.mitm && payload.mitm.ca_key_exists ? payload.mitm.ca_key_path : __COMMON_NONE_JSON__);
+      updateText(
+        'ca-trust-state',
+        payload.mitm && payload.mitm.windows_user_root_trusted === true ? __COMMON_YES_JSON__ : __COMMON_NO_JSON__
+      );
+    }
+
+    function updateTrafficView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      updateText('traffic-enabled', payload.enabled ? __COMMON_ENABLED_JSON__ : __COMMON_DISABLED_JSON__);
+      updateText('traffic-initial-cooldown', String(payload.initial_cooldown_secs) + 's');
+      updateText('traffic-initial-interval', String(payload.initial_release_interval_secs) + 's');
+      updateText('traffic-max-queue', payload.max_queue_per_host);
+      updateText('traffic-controlled-hosts', payload.controlled_hosts);
+      updateText('traffic-active-requests', payload.active_requests);
+      updateText('traffic-queued-requests', payload.queued_requests);
+      updateText('traffic-cooling-hosts', payload.cooling_hosts);
+      updateText('traffic-status-text', payload.status_text);
+      updateText('traffic-example-text', payload.example_text);
+      updateText('traffic-direction-text', payload.direction_text);
+
+      const hostRows = document.getElementById('traffic-host-rows');
+      if (hostRows) {
+        clearChildren(hostRows);
+
+        if (!payload.hosts || payload.hosts.length === 0) {
+          const row = document.createElement('tr');
+          const cell = document.createElement('td');
+          cell.colSpan = 6;
+          cell.textContent = __TRAFFIC_HOST_NONE_JSON__;
+          row.appendChild(cell);
+          hostRows.appendChild(row);
+          return;
+        }
+
+        payload.hosts.forEach(function(item) {
+          const row = document.createElement('tr');
+          const hostCell = document.createElement('td');
+          hostCell.className = 'mono';
+          hostCell.textContent = item.host;
+          const activeCell = document.createElement('td');
+          activeCell.textContent = String(item.active_requests);
+          const queuedCell = document.createElement('td');
+          queuedCell.textContent = String(item.queued_requests);
+          const cooldownCell = document.createElement('td');
+          cooldownCell.textContent = item.cooldown_text;
+          const statusCell = document.createElement('td');
+          statusCell.textContent = item.last_status_text;
+          const learnedCell = document.createElement('td');
+          learnedCell.textContent = item.learned_text;
+          row.appendChild(hostCell);
+          row.appendChild(activeCell);
+          row.appendChild(queuedCell);
+          row.appendChild(cooldownCell);
+          row.appendChild(statusCell);
+          row.appendChild(learnedCell);
+          hostRows.appendChild(row);
+        });
+      }
+    }
+
+    function updatePatchView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      updateText('patch-rule-dir', payload.rule_dir);
+      updateText('patch-model-text', payload.model_text);
+      updateText('patch-example-text', payload.example_text);
+    }
+
+    function updateRenderView(payload) {
+      if (!payload) {
+        return;
+      }
+
+      updateText('render-rule-dir', payload.rule_dir);
+      updateText('render-responsibility-text', payload.responsibility_text);
+      updateText('render-principle-text', payload.principle_text);
+    }
+
+    function applyBackendPayload(payload) {
+      if (!payload) {
+        return;
+      }
+
+      latestBackendPayload = payload;
+      updateStatusView(payload.status);
+      updateSettingsView(payload.settings);
+      updateTrafficView(payload.traffic);
+      updatePatchView(payload.patch);
+      updateRenderView(payload.render);
+      updateAdblockView(payload.adblock);
+    }
+
+    function applyLatestBackendPayload() {
+      if (latestBackendPayload) {
+        applyBackendPayload(latestBackendPayload);
+      }
+    }
+
+    function startBackendStream() {
+      if (backendSourceState.stream) {
+        return;
+      }
+
+      if (backendSourceState.reconnectTimer) {
+        clearTimeout(backendSourceState.reconnectTimer);
+        backendSourceState.reconnectTimer = null;
+      }
+
+      setLiveStatus('offline', __APP_OFFLINE_JSON__);
+      const source = new EventSource('/backend/events');
+      backendSourceState.stream = source;
+
+      source.onopen = function() {
+        setLiveStatus('online', __APP_ONLINE_JSON__);
+      };
+
+      source.onmessage = function(event) {
+        const payload = parseJsonEventData(event);
+        if (!payload) {
+          return;
+        }
+
+        if (relaygateSessionId && payload.session_id && payload.session_id !== relaygateSessionId) {
+          window.location.reload();
+          return;
+        }
+
+        relaygateSessionId = payload.session_id || relaygateSessionId;
+        applyBackendPayload(payload);
+      };
+
+      source.onerror = function() {
+        setLiveStatus('offline', __APP_OFFLINE_JSON__);
+        if (backendSourceState.stream) {
+          backendSourceState.stream.close();
+          backendSourceState.stream = null;
+        }
+        if (!backendSourceState.reconnectTimer) {
+          backendSourceState.reconnectTimer = window.setTimeout(function() {
+            backendSourceState.reconnectTimer = null;
+            startBackendStream();
+          }, 1000);
+        }
+      };
+    }
+
+    function stopBackendStream() {
+      if (backendSourceState.stream) {
+        backendSourceState.stream.close();
+        backendSourceState.stream = null;
+      }
+      if (backendSourceState.reconnectTimer) {
+        clearTimeout(backendSourceState.reconnectTimer);
+        backendSourceState.reconnectTimer = null;
+      }
+    }
+
+    function showTab(name) {
+      activeTab = name;
+
+      function setActive(status, settings, traffic, patch, render, adblock) {
+        tabStatus.classList.toggle('active', status);
+        tabSettings.classList.toggle('active', settings);
+        tabTraffic.classList.toggle('active', traffic);
+        tabPatch.classList.toggle('active', patch);
+        tabRender.classList.toggle('active', render);
+        tabAdblock.classList.toggle('active', adblock);
+      }
+
+      if (name === 'status') {
+        statusPanel.style.display = '';
+        settingsPanel.style.display = 'none';
+        trafficPanel.style.display = 'none';
+        patchPanel.style.display = 'none';
+        renderPanel.style.display = 'none';
+        adblockPanel.style.display = 'none';
+        setActive(true, false, false, false, false, false);
+      } else if (name === 'settings') {
+        statusPanel.style.display = 'none';
+        settingsPanel.style.display = '';
+        trafficPanel.style.display = 'none';
+        patchPanel.style.display = 'none';
+        renderPanel.style.display = 'none';
+        adblockPanel.style.display = 'none';
+        setActive(false, true, false, false, false, false);
+      } else if (name === 'traffic') {
+        statusPanel.style.display = 'none';
+        settingsPanel.style.display = 'none';
+        trafficPanel.style.display = '';
+        patchPanel.style.display = 'none';
+        renderPanel.style.display = 'none';
+        adblockPanel.style.display = 'none';
+        setActive(false, false, true, false, false, false);
+      } else if (name === 'patch') {
+        statusPanel.style.display = 'none';
+        settingsPanel.style.display = 'none';
+        trafficPanel.style.display = 'none';
+        patchPanel.style.display = '';
+        renderPanel.style.display = 'none';
+        adblockPanel.style.display = 'none';
+        setActive(false, false, false, true, false, false);
+      } else if (name === 'render') {
+        statusPanel.style.display = 'none';
+        settingsPanel.style.display = 'none';
+        trafficPanel.style.display = 'none';
+        patchPanel.style.display = 'none';
+        renderPanel.style.display = '';
+        adblockPanel.style.display = 'none';
+        setActive(false, false, false, false, true, false);
+      } else {
+        statusPanel.style.display = 'none';
+        settingsPanel.style.display = 'none';
+        trafficPanel.style.display = 'none';
+        patchPanel.style.display = 'none';
+        renderPanel.style.display = 'none';
+        adblockPanel.style.display = '';
+        setActive(false, false, false, false, false, true);
+      }
+
+      applyLatestBackendPayload();
+    }
+
+    startBackendStream();
+  </script>
+</body>
+</html>

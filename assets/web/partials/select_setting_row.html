@@ -1,0 +1,16 @@
+<form class="setting-row"
+  rg-post="/backend/actions/update-setting"
+  rg-target="#__FEEDBACK_TARGET__"
+  rg-swap="innerHTML">
+  <div>
+    <div class="setting-label">__LABEL__</div>
+    <div class="setting-note">__NOTE__</div>
+  </div>
+  <div>
+    <input type="hidden" name="key" value="__KEY__">
+    <select __SELECT_ID_ATTR__ name="value" onchange="this.form.requestSubmit()">
+      __OPTION_HTML__
+    </select>
+  </div>
+  <div></div>
+</form>

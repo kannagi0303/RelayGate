@@ -1,0 +1,63 @@
+<h2 class="section-title">{{traffic_page.title}}</h2>
+<p class="section-subtitle">{{traffic_page.sub}}</p>
+
+<div class="grid">
+  <div class="stat-grid">
+    <div class="stat">
+      <div class="stat-label">{{traffic_page.mode}}</div>
+      <div id="traffic-enabled" class="stat-value">-</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">{{traffic_page.active}}</div>
+      <div id="traffic-active-requests" class="stat-value">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">{{traffic_page.queued}}</div>
+      <div id="traffic-queued-requests" class="stat-value">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">{{traffic_page.cooling}}</div>
+      <div id="traffic-cooling-hosts" class="stat-value">0</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{traffic_page.strategy}}</div>
+    <table>
+      <tr><th>{{common.item}}</th><th>{{common.value}}</th></tr>
+      <tr><td>{{traffic_page.cooldown}}</td><td id="traffic-initial-cooldown"></td></tr>
+      <tr><td>{{traffic_page.interval}}</td><td id="traffic-initial-interval"></td></tr>
+      <tr><td>{{traffic_page.max_queue}}</td><td id="traffic-max-queue"></td></tr>
+      <tr><td>{{traffic_page.hosts}}</td><td id="traffic-controlled-hosts"></td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{traffic_page.position}}</div>
+    <table>
+      <tr><th>{{common.item}}</th><th>{{common.desc}}</th></tr>
+      <tr><td>{{common.duty}}</td><td id="traffic-status-text"></td></tr>
+      <tr><td>{{common.example}}</td><td id="traffic-example-text"></td></tr>
+      <tr><td>{{common.direction}}</td><td id="traffic-direction-text"></td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{traffic_page.host.title}}</div>
+    <table>
+      <thead>
+        <tr>
+          <th>{{common.host}}</th>
+          <th>{{traffic_page.host.in_flight}}</th>
+          <th>{{traffic_page.host.queued}}</th>
+          <th>{{common.cooldown}}</th>
+          <th>{{traffic_page.host.latest}}</th>
+          <th>{{traffic_page.host.learned}}</th>
+        </tr>
+      </thead>
+      <tbody id="traffic-host-rows">
+        <tr><td colspan="6">{{traffic_page.host.none}}</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>

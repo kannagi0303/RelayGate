@@ -1,0 +1,23 @@
+# Rust build output.
+/target/
+
+# Local runtime data and sensitive files.
+/logs/
+/mitm/
+/data/logs/
+/data/mitm/
+/relaygate.yaml
+/data/adblock/
+/data/rewrite/
+/data/traffic/
+/data/patch/*
+!/data/patch/youtube.yaml
+
+# Local development notes.
+/notes/
+
+# Common editor files.
+.idea/
+.vscode/
+*.tmp
+*.log

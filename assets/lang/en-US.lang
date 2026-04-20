@@ -1,0 +1,218 @@
+meta:
+  locale: "en-US"
+  name: "English (United States)"
+  version: 1
+
+common:
+  none: "None"
+  yes: "Yes"
+  no: "No"
+  enabled: "Enabled"
+  disabled: "Disabled"
+  auto: "Automatic"
+  save: "Save"
+  item: "Item"
+  value: "Value"
+  desc: "Description"
+  file: "File"
+  size: "Size"
+  bytes: "bytes"
+  status: "Status"
+  proxy: "Proxy"
+  web: "Web"
+  host: "Host"
+  cooldown: "Cooldown"
+  direction: "Direction"
+  example: "Example"
+  duty: "Role"
+  model: "Data Model"
+  rule: "Rule"
+  latest: "Latest Status"
+  learned: "Learned State"
+
+app:
+  title: "Settings"
+  hint: "Local settings page v1. This page focuses on status and one setting at a time."
+  online: "Online"
+  offline: "Offline"
+
+nav:
+  system: "System"
+  core: "Core"
+  content: "Content Filtering"
+  status: "Status"
+  settings: "Settings"
+  traffic: "Traffic"
+  patch: "Patch"
+  render: "Render"
+  adblock: "Adblock"
+
+tray:
+  open: "Open Control Panel"
+  reload: "Reload"
+  exit: "Exit"
+
+settings:
+  app_name:
+    label: "App Name"
+    note: "Shown in the web UI and tray area."
+  proxy:
+    label: "Proxy Listen Address"
+    note: "A hot reload or restart is still required after changes."
+  web:
+    label: "Web Listen Address"
+    note: "The listener is not rebound live in this version."
+  adblock:
+    label: "Tracker and Ad Blocking"
+    note: "Mode behavior follows Brave. Standard does not block first-party requests at the network layer. Aggressive also blocks first-party requests."
+  tray:
+    label: "Tray Enabled"
+
+adblock:
+  mode:
+    off: "Disabled"
+    std: "Standard"
+    agg: "Aggressive"
+  page:
+    sub: "This page now follows Brave with three modes: `Disabled / Standard / Aggressive`. Lists and resources sync from Brave defaults in the background. Manual update downloads and reloads them right away."
+  feature: "Feature Status"
+  update:
+    label: "Rule Update"
+    note: "Brave default lists and resources sync in the background. Use manual update if you want to refresh them now."
+    auto: "Automatic"
+    now: "Update Now"
+  rules:
+    label: "Rule Sources"
+    sub: "Loaded <strong id=\"adblock-rule-count\">0</strong> rules and <strong id=\"adblock-resource-count\">0</strong> resources. The selected mode decides whether requests should block first-party traffic like Brave. `Standard` is more conservative. `Aggressive` is closer to Brave Aggressive."
+    none: "No rule files were found. Download the default rules first, or place `.txt`, `.list`, `.filter`, or `.filters` files here."
+  resources:
+    label: "Resource Files"
+    none: "No resources.json file was found. Redirect and scriptlet resources are not loaded."
+
+status_page:
+  title: "Status"
+  sub: "This page focuses on overall status and loaded features. Recent connection tracking is no longer shown here."
+  mitm: "MITM"
+  rewrite: "Site Rewrite"
+  adblock: "Adblock"
+  summary: "System Summary"
+  upstreams: "Upstreams"
+  rules: "Proxy Rules"
+
+settings_page:
+  title: "Settings"
+  sub: "This version focuses on one setting at a time. Saving writes directly to `relaygate.yaml`."
+  basic: "Basic Settings"
+  actions:
+    title: "Actions"
+    sub: "This version only provides safe and common actions. Restart is not available yet."
+    reload_rules: "Reload Rewrite Rules"
+    reload_config: "Reload Configuration"
+    exit: "Exit RelayGate"
+
+traffic_page:
+  title: "Traffic"
+  sub: "This page will later hold same-site request control, 429 cooldown, queue, and retry settings. For now, it is a separate page skeleton."
+  mode: "Mode"
+  active: "Active Requests"
+  queued: "Queued Requests"
+  cooling: "Cooling Hosts"
+  strategy: "First Version Strategy"
+  cooldown: "Initial Cooldown"
+  interval: "Initial Release Interval"
+  max_queue: "Max Queue per Host"
+  hosts: "Managed Hosts"
+  position: "Role"
+  host:
+    title: "Host Status"
+    in_flight: "Active"
+    queued: "Queued"
+    latest: "Latest Status"
+    learned: "Learned State"
+    none: "No traffic data yet."
+
+patch_page:
+  title: "Patch"
+  sub: "This page handles focused upstream response patches, such as JSON key cleanup, JavaScript value replacement in HTML, and header changes."
+  current: "Current Direction"
+  path: "Rule Path"
+  cases: "Verified Cases"
+
+render_page:
+  title: "Render"
+  sub: "This page keeps the extract -> render role. It fits sites like onejav that rebuild output from extracted data."
+  current: "Current Direction"
+  path: "Rule Path"
+
+ca:
+  title: "CA Certificate"
+  cert:
+    label: "Certificate Path"
+    note: "Path to the current RelayGate CA certificate."
+  key:
+    label: "Private Key Path"
+    note: "Path to the current RelayGate CA private key."
+  trust:
+    label: "Windows Trust"
+    note: "Whether the current user's Root store still trusts this CA."
+    install: "Install CA to Windows"
+    remove: "Remove CA Trust"
+
+backend:
+  reload:
+    adblock_fail: "Failed to reload Adblock rules: {error}"
+    rules_ok: "Rewrite rules reloaded. Loaded {rule_count} rule sets. Adblock loaded {adblock_rule_count} rules and {adblock_resource_count} resources."
+    rules_fail: "Failed to reload rewrite rules: {error}"
+  config:
+    adblock_fail: "Configuration loaded, but Adblock reload failed: {error}"
+    ok: "Configuration reloaded and applied to the control panel memory state. Running listeners and core behavior still need hot-reload support later."
+    fail: "Failed to reload configuration: {error}"
+  sync:
+    reload_fail: "Rules synced, but reload failed: {error}"
+    ok: "Brave default lists and resources synced: {files}. Loaded {rule_count} rules and {resource_count} resources."
+    fail: "Failed to sync Brave rules: {error}"
+  ca:
+    ok: "Local CA is ready and installed in the Windows trust store."
+    unverified: "The install step ran, but this CA is still not confirmed in the Windows trust store."
+    fail: "Failed to install CA to Windows: {error}"
+    remove_fail: "Failed to remove CA trust: {error}"
+    no_cert: "No local CA certificate file was found. Trust cannot be removed."
+    no_diag: "No extra diagnostics are available"
+    kept: "RelayGate CA trust was removed from Windows. Local CA files were kept."
+    thumb_fail: "Failed to read the local CA thumbprint: {stderr}"
+    still:
+      diag: "The CA still exists in: {path}; diagnostics: {details}"
+      result: "The CA still exists in: {path}; result: {result}; diagnostics: {details}"
+      remove: "The CA still exists in: {path}; result: {result}; removal details: {remove_details}; diagnostics: {details}"
+      store: "{store_label} still has remaining entries after removal ({stdout})"
+  exit:
+    ok: "Exit requested. RelayGate will close soon."
+  save:
+    fail: "Save failed: {error}"
+    ok: "Saved {setting}."
+
+traffic:
+  mode:
+    auto: "Automatic"
+    none: "None"
+  host:
+    none: "None yet"
+    throttling: "Throttled"
+    pass: "Passing"
+  text:
+    status: "Handles request admission, throttling, queueing, delayed retry, and same-site release strategy."
+    example: "When a site returns 429, RelayGate pauses later requests to the same site for a while, then releases them step by step."
+    direction: "Separate from patch and render work. It does not mix with response content rewrite."
+  wait:
+    title: "RelayGate Waiting"
+    message: "RelayGate is waiting and retrying: {url}"
+
+patch:
+  text:
+    model: "The first version now supports both vars and json stages, with pipe as the minimum processing layer."
+    example: "YouTube is now driven by patch YAML instead of only hard-coded MITM functions."
+
+render:
+  text:
+    duty: "Matches a rule from the URL, extracts data, applies a template, and outputs new page content."
+    rule: "Do not grow this into a generic rewrite engine. Keep patch and render separate."

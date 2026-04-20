@@ -1,0 +1,35 @@
+<h2 class="section-title">{{settings_page.title}}</h2>
+<p class="section-subtitle">{{{settings_page.sub}}}</p>
+
+<div class="grid">
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{settings_page.basic}}</div>
+    <div class="settings-group">
+      __APP_NAME_ROW__
+      __PROXY_LISTEN_ROW__
+      __WEB_LISTEN_ROW__
+    </div>
+    <div id="settings-feedback" class="feedback"></div>
+  </div>
+
+  __CA_CARD__
+
+  <div class="card">
+    <div class="section-title" style="font-size:18px">{{settings_page.actions.title}}</div>
+    <p class="section-subtitle">{{settings_page.actions.sub}}</p>
+    <div class="actions">
+      <button class="btn soft"
+              rg-post="/backend/actions/reload-rules"
+              rg-target="#settings-feedback"
+              rg-swap="innerHTML">{{settings_page.actions.reload_rules}}</button>
+      <button class="btn soft"
+              rg-post="/backend/actions/reload-config"
+              rg-target="#settings-feedback"
+              rg-swap="innerHTML">{{settings_page.actions.reload_config}}</button>
+      <button class="btn danger"
+              rg-post="/backend/actions/exit"
+              rg-target="#settings-feedback"
+              rg-swap="innerHTML">{{settings_page.actions.exit}}</button>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,23 @@
+hosts:
+  - www.youtube.com
+
+vars:
+  ytInitialPlayerResponse:
+    match:
+      - ^https://www\.youtube\.com/watch\?
+    pipe:
+      - remove:
+          - playerAds
+          - adPlacements
+          - adSlots
+          - adBreakHeartbeatParams
+
+json:
+  match:
+    - ^https://www\.youtube\.com/youtubei/v1/(get_watch|player)\?
+  pipe:
+    - remove:
+        - playerAds
+        - adPlacements
+        - adSlots
+        - adBreakHeartbeatParams
