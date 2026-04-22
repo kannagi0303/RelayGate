@@ -10,6 +10,8 @@ It supports:
 - Rule-based patch support
 - Rule-based rewrite support
 
+<img src="flow.png" width="480"/>
+
 ## What RelayGate does
 
 - Proxy HTTP and HTTPS traffic
