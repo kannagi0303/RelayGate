@@ -10,7 +10,8 @@ It supports:
 - Rule-based patch support
 - Rule-based rewrite support
 
-<img src="flow.png" width="480"/>
+
+<img src="flow.png" width="300"/>
 
 ## What RelayGate does
 
