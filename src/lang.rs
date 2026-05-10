@@ -1,48 +1,65 @@
-use std::{fs, path::PathBuf, sync::OnceLock};
+use std::{
+    fs,
+    path::PathBuf,
+    sync::{OnceLock, RwLock},
+};
 
 use anyhow::{Context, Result};
+use serde::Serialize;
+use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value};
 
 use crate::path_mode::{app_path_mode, AppPathMode};
 
-const BUILTIN_LANG: &str = include_str!(concat!(
+const BUILTIN_EN_US: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/lang/en-US.lang"
 ));
+const BUILTIN_ZH_TW: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/lang/zh-TW.lang"
+));
+const FALLBACK_LOCALE: &str = "en-US";
 
-static CURRENT_LANG: OnceLock<LangCatalog> = OnceLock::new();
+static CURRENT_LANG: OnceLock<RwLock<LangCatalog>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct LangCatalog {
     root: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct WebI18nPayload {
+    pub locale: String,
+    pub available_locales: Vec<String>,
+    pub messages: JsonValue,
+}
+
 impl LangCatalog {
     fn load() -> Result<Self> {
-        let mut root = serde_yaml::from_str::<Value>(BUILTIN_LANG)
-            .context("failed to parse built-in en-US language file")?;
+        let override_root = load_override_root()?;
+        let config_locale = load_config_locale()?;
+        let locale = override_root
+            .as_ref()
+            .and_then(|root| lookup_path(root, "meta.locale"))
+            .and_then(Value::as_str)
+            .or(config_locale.as_deref())
+            .unwrap_or(FALLBACK_LOCALE);
 
-        if let Some(path) = override_path()? {
-            let content = match fs::read_to_string(&path) {
-                Ok(content) => Some(content),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => {
-                    tracing::warn!(path = %path.display(), error = %error, "failed to read relaygate.lang override");
-                    None
-                }
-            };
+        let mut root = parse_builtin(FALLBACK_LOCALE)?;
+        if locale != FALLBACK_LOCALE {
+            merge_value(&mut root, parse_builtin(locale)?);
+        }
 
-            if let Some(content) = content {
-                match serde_yaml::from_str::<Value>(&content) {
-                    Ok(override_root) => merge_value(&mut root, override_root),
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), error = %error, "failed to parse relaygate.lang override");
-                    }
-                }
-            }
+        if let Some(override_root) = override_root {
+            merge_value(&mut root, override_root);
         }
 
         Ok(Self { root })
+    }
+
+    fn available_locales() -> Vec<String> {
+        vec![FALLBACK_LOCALE.to_string(), "zh-TW".to_string()]
     }
 
     pub fn text(&self, path: &str) -> String {
@@ -60,6 +77,14 @@ impl LangCatalog {
         }
         text
     }
+
+    fn locale(&self) -> String {
+        self.text("meta.locale")
+    }
+
+    fn messages_json(&self) -> JsonValue {
+        serde_json::to_value(&self.root).unwrap_or_else(|_| JsonValue::Object(Default::default()))
+    }
 }
 
 pub fn init_current() -> Result<()> {
@@ -68,27 +93,115 @@ pub fn init_current() -> Result<()> {
     }
 
     let catalog = LangCatalog::load()?;
-    let _ = CURRENT_LANG.set(catalog);
+    let _ = CURRENT_LANG.set(RwLock::new(catalog));
     Ok(())
 }
 
-pub fn current() -> &'static LangCatalog {
+fn current_cell() -> &'static RwLock<LangCatalog> {
     CURRENT_LANG.get_or_init(|| {
-        LangCatalog::load().unwrap_or_else(|error| {
+        RwLock::new(LangCatalog::load().unwrap_or_else(|error| {
             tracing::warn!(error = %error, "failed to initialize language catalog; falling back to empty catalog");
             LangCatalog {
                 root: Value::Mapping(Mapping::new()),
             }
-        })
+        }))
     })
 }
 
+fn current_clone() -> LangCatalog {
+    current_cell()
+        .read()
+        .map(|catalog| catalog.clone())
+        .unwrap_or_else(|_| LangCatalog {
+            root: Value::Mapping(Mapping::new()),
+        })
+}
+
+fn replace_current(catalog: LangCatalog) {
+    if let Ok(mut current) = current_cell().write() {
+        *current = catalog;
+    }
+}
+
 pub fn text(path: &str) -> String {
-    current().text(path)
+    current_clone().text(path)
 }
 
 pub fn format(path: &str, values: &[(&str, String)]) -> String {
-    current().format(path, values)
+    current_clone().format(path, values)
+}
+
+pub fn web_i18n_payload() -> WebI18nPayload {
+    let catalog = LangCatalog::load().unwrap_or_else(|error| {
+        tracing::warn!(error = %error, "failed to reload web language catalog; using current catalog");
+        current_clone()
+    });
+    replace_current(catalog.clone());
+
+    WebI18nPayload {
+        locale: catalog.locale(),
+        available_locales: LangCatalog::available_locales(),
+        messages: catalog.messages_json(),
+    }
+}
+
+pub fn available_locales() -> Vec<String> {
+    LangCatalog::available_locales()
+}
+
+fn parse_builtin(locale: &str) -> Result<Value> {
+    let content = match locale {
+        "zh-TW" => BUILTIN_ZH_TW,
+        _ => BUILTIN_EN_US,
+    };
+    serde_yaml::from_str::<Value>(content)
+        .with_context(|| format!("failed to parse built-in {locale} language file"))
+}
+
+fn load_override_root() -> Result<Option<Value>> {
+    let Some(path) = override_path()? else {
+        return Ok(None);
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to read relaygate.lang override");
+            return Ok(None);
+        }
+    };
+
+    match serde_yaml::from_str::<Value>(&content) {
+        Ok(override_root) => Ok(Some(override_root)),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to parse relaygate.lang override");
+            Ok(None)
+        }
+    }
+}
+
+fn load_config_locale() -> Result<Option<String>> {
+    let Some(path) = config_path()? else {
+        return Ok(None);
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to read relaygate.yaml locale");
+            return Ok(None);
+        }
+    };
+    let root = match serde_yaml::from_str::<Value>(&content) {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), error = %error, "failed to parse relaygate.yaml locale");
+            return Ok(None);
+        }
+    };
+    Ok(lookup_path(&root, "locale")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned))
 }
 
 fn override_path() -> Result<Option<PathBuf>> {
@@ -104,6 +217,21 @@ fn override_path() -> Result<Option<PathBuf>> {
     };
 
     Ok(Some(base.join("relaygate.lang")))
+}
+
+fn config_path() -> Result<Option<PathBuf>> {
+    let base = match app_path_mode() {
+        AppPathMode::Workspace => PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        AppPathMode::Portable => {
+            let exe =
+                std::env::current_exe().context("failed to resolve current executable path")?;
+            exe.parent()
+                .context("current executable path does not have a parent directory")?
+                .to_path_buf()
+        }
+    };
+
+    Ok(Some(base.join("relaygate.yaml")))
 }
 
 fn lookup_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {

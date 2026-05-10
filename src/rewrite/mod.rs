@@ -16,8 +16,9 @@ use serde_yaml::Value as YamlValue;
 use crate::path_mode::{app_path_mode, AppPathMode};
 
 /// First rewrite rule engine.
-/// It currently covers the features needed by onejav and follows this model:
-/// - load all `data/rewrite/*.yaml` files into memory on startup
+/// It currently covers the first site-specific rewrite features and follows this model:
+/// - load rewrite YAML rules into memory on startup / hot reload
+/// - keep render template paths and read template HTML only when a rule matches
 /// - use loaded rule hosts to decide CONNECT interception
 /// - use loaded rule URL matches to decide page rewrites
 
@@ -35,7 +36,7 @@ struct LoadedRewriteRule {
     hosts: HashSet<String>,
     matchers: Vec<Regex>,
     fields: HashMap<String, LoadedRewriteFieldRule>,
-    template: String,
+    template_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -244,7 +245,13 @@ impl RewriteRegistry {
             }
         }
 
-        let rendered = render_template(&rule.template, &context);
+        let template = fs::read_to_string(&rule.template_path).with_context(|| {
+            format!(
+                "failed to read rewrite template during render: {}",
+                rule.template_path.display()
+            )
+        })?;
+        let rendered = render_template(&template, &context);
         Ok(RenderApplyResult {
             body: rendered.into_bytes(),
             matched: true,
@@ -424,12 +431,18 @@ fn load_rule_file(path: &Path) -> Result<LoadedRewriteRule> {
     }
 
     let template_path = rewrite_template_path(&rule.render);
-    let template = fs::read_to_string(&template_path).with_context(|| {
+    let template_metadata = fs::metadata(&template_path).with_context(|| {
         format!(
-            "failed to read rewrite template: {}",
+            "failed to stat rewrite template: {}",
             template_path.display()
         )
     })?;
+    if !template_metadata.is_file() {
+        anyhow::bail!(
+            "rewrite template is not a regular file: {}",
+            template_path.display()
+        );
+    }
 
     let mut matchers = Vec::new();
     for pattern in &rule.match_rules {
@@ -454,7 +467,7 @@ fn load_rule_file(path: &Path) -> Result<LoadedRewriteRule> {
         hosts,
         matchers,
         fields,
-        template,
+        template_path,
     })
 }
 

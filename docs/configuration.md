@@ -1,69 +1,80 @@
-# Configuration
+# Configuration Guide
 
-Main example:
+RelayGate uses local configuration files.
 
-- [relaygate.example.yaml](../relaygate.example.yaml)
+## Main Config
 
-## Sections
+Main config file:
 
-- `app`
-- `proxy`
-- `web`
-- `tray`
-- `traffic`
-- `logging`
-- `gateway`
-- `upstreams`
-- `rules`
+```text
+relaygate.yaml
+```
 
-## app
+Public example:
 
-- `name`: app name
+```text
+relaygate.example.yaml
+```
 
-## proxy
+Common settings include:
 
-- `listen`: proxy listen address. Default: `0.0.0.0:8787`
-- `mitm.enabled`: turn HTTPS MITM on or off
-- `mitm.tolerate_invalid_upstream_cert_hosts`: hosts that may skip the upstream TLS check
-- `adblock.enabled`: turn adblock on or off
-- `adblock.mode`: adblock mode
-- `adblock.auto_update`: allow auto update for filter data
+- proxy listen address
+- web control panel listen address
+- HTTPS MITM settings
+- adblock mode
+- upstream protocol preference
+- downstream protocol preference
+- traffic scheduling settings
+- gateway mounts
+- local rules
 
-## web
+## DNS Config
 
-- `listen`: web listen address. Default: `0.0.0.0:8788`
-- `open_browser_on_launch`: open the web page at start
+Public example:
 
-## tray
+```text
+data/dns.example.yaml
+```
 
-- `enabled`: turn Windows tray on or off
+Runtime file:
 
-## traffic
+```text
+data/dns.yaml
+```
 
-- `enabled`: turn traffic control on or off
-- `max_queue_per_host`: max queued requests for one host
-- `initial_cooldown_secs`: first cooldown time
-- `initial_release_interval_secs`: first release interval
-- `min_cooldown_secs`: min cooldown time
-- `max_cooldown_secs`: max cooldown time
-- `min_release_interval_secs`: min release interval
-- `max_release_interval_secs`: max release interval
-- `auto_adjust_step_secs`: auto adjust step
-- `auto_relax_after_successes`: success count before relax
-- `internal_retry_limit`: internal retry count
+DNS config can include:
 
-## logging
+- DNS profiles
+- UDP DNS servers
+- system DNS profile
+- fallback profiles
+- host-based DNS routes
+- strict route behavior
 
-- `log_response_body`: log response body or not
+## Upstream Proxy Config
 
-## gateway
+Public example:
 
-- `mounts`: gateway mount list
+```text
+data/upstreams.example.yaml
+```
 
-## upstreams
+Runtime file:
 
-- Upstream server list
+```text
+data/upstreams.yaml
+```
 
-## rules
+Upstream config can include:
 
-- Rule list for routing and behavior
+- upstream proxy profiles
+- host pattern routes
+- enable or disable flags
+
+## Local Runtime Files
+
+Runtime files are private local data.
+
+Do not publish runtime configs, logs, local CA files, or private rules.
+
+See [Privacy And Data](./privacy-and-data.md).

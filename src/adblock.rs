@@ -1,8 +1,10 @@
 use std::{
     collections::HashSet,
     env, fs,
+    io::Write,
     path::PathBuf,
     sync::{Arc, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use adblock::{
@@ -29,6 +31,7 @@ pub type SharedAdblockState = Arc<RwLock<AdblockState>>;
 
 pub struct AdblockState {
     mode: Option<AdblockMode>,
+    debug_log: bool,
     rule_count: usize,
     resource_count: usize,
     engine: Engine,
@@ -74,6 +77,9 @@ struct AdblockDocumentInjectionPlan {
 pub struct AdblockRuleFileInfo {
     pub name: String,
     pub size: u64,
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+    pub tags: Vec<String>,
 }
 
 const BRAVE_LIST_CATALOG_URL: &str =
@@ -82,7 +88,11 @@ const BRAVE_RESOURCES_URL: &str =
     "https://raw.githubusercontent.com/brave/adblock-resources/master/dist/resources.json";
 const RESOURCES_FILE_NAME: &str = "resources.json";
 const RULE_MANIFEST_FILE_NAME: &str = "rule_sources.json";
-const MIN_EXPECTED_DEFAULT_LISTS: usize = 8;
+const SYNC_STATE_FILE_NAME: &str = "sync_state.json";
+const CUSTOM_RULE_FILE_NAME: &str = "custom.txt";
+const CUSTOM_RULE_FILE_HEADER: &str = "! RelayGate custom adblock rules\n! Edit this file, then use the Adblock page hot reload button.\n! Example: ||example.com/ad.js$script\n\n";
+const BRAVE_COMPAT_PROFILE_VERSION: u32 = 6;
+pub const DEFAULT_AUTO_UPDATE_INTERVAL_SECS: u64 = 6 * 60 * 60;
 
 const FALLBACK_DEFAULT_RULE_LISTS: &[(&str, &str)] = &[
     ("easylist.txt", "https://easylist.to/easylist/easylist.txt"),
@@ -111,9 +121,17 @@ const FALLBACK_DEFAULT_RULE_LISTS: &[(&str, &str)] = &[
 #[derive(Debug, Deserialize)]
 struct BraveListCatalogEntry {
     #[serde(default)]
+    uuid: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
     default_enabled: bool,
     #[serde(default)]
     hidden: bool,
+    #[serde(default)]
+    first_party_protections: bool,
+    #[serde(default)]
+    permission_mask: u8,
     #[serde(default)]
     platforms: Vec<String>,
     #[serde(default)]
@@ -124,7 +142,21 @@ struct BraveListCatalogEntry {
 struct BraveListSource {
     url: String,
     #[serde(default)]
+    title: String,
+    #[serde(default)]
     format: String,
+}
+
+#[derive(Debug, Clone)]
+struct BraveSelectedListSource {
+    url: String,
+    title: String,
+    group_title: String,
+    format: FilterFormat,
+    permission_mask: u8,
+    hidden: bool,
+    default_enabled: bool,
+    first_party_protections: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -138,13 +170,32 @@ struct AdblockRuleManifestEntry {
     file_name: String,
     #[serde(default)]
     source_url: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    group_title: String,
     format: FilterFormat,
     #[serde(default)]
     permissions: u8,
+    #[serde(default)]
+    hidden: bool,
+    #[serde(default)]
+    default_enabled: bool,
+    #[serde(default)]
+    first_party_protections: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AdblockSyncState {
+    #[serde(default)]
+    last_success_unix: u64,
+    #[serde(default)]
+    profile_version: u32,
 }
 
 impl AdblockState {
     pub fn load(config: &RelayGateConfig) -> Result<Self> {
+        ensure_custom_rule_file()?;
         let (mut engine, rule_count) = load_rule_engine()?;
         let resources = load_resources()?;
         let resource_count = resources.len();
@@ -154,6 +205,7 @@ impl AdblockState {
 
         Ok(Self {
             mode: config.proxy.adblock.effective_mode(),
+            debug_log: config.adblock_debug_log,
             rule_count,
             resource_count,
             engine,
@@ -170,6 +222,14 @@ impl AdblockState {
 
     pub fn set_mode(&mut self, mode: Option<AdblockMode>) {
         self.mode = mode;
+    }
+
+    pub fn set_debug_log(&mut self, enabled: bool) {
+        self.debug_log = enabled;
+    }
+
+    pub fn debug_log(&self) -> bool {
+        self.debug_log
     }
 
     pub fn rule_count(&self) -> usize {
@@ -190,27 +250,47 @@ impl AdblockState {
         let prepared = build_adblock_request(url, source_url, request_type, fetch_site)
             .with_context(|| format!("failed to build adblock request for `{url}`"))?;
         let Some(mode) = self.mode else {
-            return Ok(AdblockMatch {
+            let outcome = AdblockMatch {
                 request_type: request_type.to_string(),
                 source_url: source_url.to_string(),
                 fetch_site: fetch_site.map(ToOwned::to_owned),
                 third_party: prepared.third_party,
                 ..AdblockMatch::default()
-            });
+            };
+            self.log_request_decision(
+                url,
+                request_type,
+                source_url,
+                fetch_site,
+                &outcome,
+                None,
+                Some("mode_disabled"),
+            );
+            return Ok(outcome);
         };
         if matches!(mode, AdblockMode::Standard) && !prepared.third_party {
-            return Ok(AdblockMatch {
+            let outcome = AdblockMatch {
                 request_type: request_type.to_string(),
                 source_url: source_url.to_string(),
                 fetch_site: fetch_site.map(ToOwned::to_owned),
                 third_party: prepared.third_party,
                 ..AdblockMatch::default()
-            });
+            };
+            self.log_request_decision(
+                url,
+                request_type,
+                source_url,
+                fetch_site,
+                &outcome,
+                Some(mode),
+                Some("standard_first_party_skip"),
+            );
+            return Ok(outcome);
         }
 
         let result = self.engine.check_network_request(&prepared.request);
 
-        Ok(AdblockMatch {
+        let outcome = AdblockMatch {
             request_type: request_type.to_string(),
             source_url: source_url.to_string(),
             fetch_site: fetch_site.map(ToOwned::to_owned),
@@ -220,12 +300,63 @@ impl AdblockState {
             redirect: result.redirect.as_deref().and_then(parse_redirect_data_url),
             rewritten_url: result.rewritten_url,
             exception: result.exception,
-        })
+        };
+        self.log_request_decision(
+            url,
+            request_type,
+            source_url,
+            fetch_site,
+            &outcome,
+            Some(mode),
+            None,
+        );
+        Ok(outcome)
+    }
+
+    fn log_request_decision(
+        &self,
+        url: &str,
+        request_type: &str,
+        source_url: &str,
+        fetch_site: Option<&str>,
+        outcome: &AdblockMatch,
+        mode: Option<AdblockMode>,
+        skipped_reason: Option<&str>,
+    ) {
+        if !self.debug_log {
+            return;
+        }
+
+        let event = json!({
+            "ts_unix": unix_seconds_now(),
+            "mode": mode.map(adblock_mode_name),
+            "url": url,
+            "source_url": source_url,
+            "request_type": request_type,
+            "fetch_site": fetch_site,
+            "third_party": outcome.third_party,
+            "matched": outcome.matched,
+            "blocked": outcome.matched && outcome.exception.is_none(),
+            "filter": outcome.filter.as_deref(),
+            "exception": outcome.exception.as_deref(),
+            "redirect": outcome.redirect.is_some(),
+            "rewritten_url": outcome.rewritten_url.as_deref(),
+            "skipped_reason": skipped_reason,
+        });
+
+        if let Err(error) = write_adblock_debug_event(event) {
+            tracing::debug!(?error, "failed to write adblock debug event");
+        }
     }
 
     pub fn cosmetic_resources(&self, url: &str) -> AdblockCosmeticState {
         let resources = self.engine.url_cosmetic_resources(url);
         convert_cosmetic_resources(resources)
+    }
+
+    pub fn may_render_document_injection(&self, url: &str) -> bool {
+        let resources = self.cosmetic_resources(url);
+        has_document_injection_work(&resources)
     }
 
     pub fn document_cosmetic_state(&self, url: &str, html: &[u8]) -> AdblockCosmeticState {
@@ -301,6 +432,12 @@ pub fn set_mode(shared: &SharedAdblockState, mode: Option<AdblockMode>) {
     }
 }
 
+pub fn set_debug_log(shared: &SharedAdblockState, enabled: bool) {
+    if let Ok(mut guard) = shared.write() {
+        guard.set_debug_log(enabled);
+    }
+}
+
 pub fn is_enabled(shared: &SharedAdblockState) -> bool {
     shared
         .read()
@@ -340,6 +477,13 @@ pub fn cosmetic_resources_for_document(
         .read()
         .map(|guard| guard.cosmetic_resources(url))
         .unwrap_or_default()
+}
+
+pub fn may_render_document_injection(shared: &SharedAdblockState, url: &str) -> bool {
+    shared
+        .read()
+        .map(|guard| guard.may_render_document_injection(url))
+        .unwrap_or(false)
 }
 
 pub fn render_document_injection(
@@ -453,34 +597,61 @@ pub fn csp_directives_for_request(
 }
 
 pub fn list_rule_files() -> Result<Vec<AdblockRuleFileInfo>> {
+    ensure_custom_rule_file()?;
     let dir = adblock_rules_dir();
     if !dir.exists() {
         return Ok(Vec::new());
     }
 
+    let manifest = load_rule_manifest().unwrap_or_default();
     let mut files = fs::read_dir(&dir)
         .with_context(|| format!("failed to read adblock rule dir: {}", dir.display()))?
         .filter_map(|entry| entry.ok())
         .filter_map(|entry| {
             let path = entry.path();
-            let is_rule = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    matches!(
-                        ext.to_ascii_lowercase().as_str(),
-                        "txt" | "list" | "filters" | "filter"
-                    )
-                })
-                .unwrap_or(false);
-            if !is_rule {
+            if !is_supported_rule_file(&path) {
                 return None;
             }
 
             let metadata = entry.metadata().ok()?;
+            let name = path.file_name()?.to_string_lossy().to_string();
+            let manifest_entry = manifest.lists.iter().find(|item| item.file_name == name);
+            let mut tags = Vec::new();
+            if is_custom_rule_file(&path) {
+                tags.push("custom".to_string());
+            }
+            if manifest_entry.map(|item| item.hidden).unwrap_or(false) {
+                tags.push("brave-hidden".to_string());
+            }
+            if manifest_entry
+                .map(|item| item.first_party_protections)
+                .unwrap_or(false)
+            {
+                tags.push("first-party".to_string());
+            }
+            if manifest_entry
+                .map(|item| item.default_enabled)
+                .unwrap_or(false)
+            {
+                tags.push("default".to_string());
+            }
+            if manifest_entry
+                .map(|item| item.permissions != 0)
+                .unwrap_or(false)
+            {
+                tags.push("limited-permissions".to_string());
+            }
+
             Some(AdblockRuleFileInfo {
-                name: path.file_name()?.to_string_lossy().to_string(),
+                name,
                 size: metadata.len(),
+                source_url: manifest_entry
+                    .map(|item| item.source_url.clone())
+                    .filter(|item| !item.trim().is_empty()),
+                title: manifest_entry
+                    .map(|item| display_rule_title(item))
+                    .filter(|item| !item.trim().is_empty()),
+                tags,
             })
         })
         .collect::<Vec<_>>();
@@ -504,10 +675,38 @@ pub fn list_resource_files() -> Result<Vec<AdblockRuleFileInfo>> {
             .map(|item| item.to_string_lossy().to_string())
             .unwrap_or_else(|| RESOURCES_FILE_NAME.to_string()),
         size: metadata.len(),
+        source_url: Some(BRAVE_RESOURCES_URL.to_string()),
+        title: Some("Brave resources / scriptlets".to_string()),
+        tags: vec!["resources".to_string()],
     }])
 }
 
+pub fn adblock_rule_dir_path() -> PathBuf {
+    adblock_rules_dir()
+}
+
+pub fn custom_rule_file_path() -> Result<PathBuf> {
+    ensure_custom_rule_file()
+}
+
 pub async fn sync_default_resources() -> Result<Vec<String>> {
+    sync_default_resources_if_due(DEFAULT_AUTO_UPDATE_INTERVAL_SECS).await
+}
+
+pub async fn sync_default_resources_forced() -> Result<Vec<String>> {
+    reset_generated_rule_files()?;
+    sync_default_resources_if_due(0).await
+}
+
+pub async fn sync_default_resources_if_due(interval_secs: u64) -> Result<Vec<String>> {
+    if !adblock_sync_due(interval_secs) && default_resources_present() {
+        tracing::debug!(
+            interval_secs,
+            "adblock default list sync skipped; persisted sync interval has not elapsed"
+        );
+        return Ok(Vec::new());
+    }
+
     let dir = adblock_rules_dir();
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create adblock rule dir: {}", dir.display()))?;
@@ -518,14 +717,9 @@ pub async fn sync_default_resources() -> Result<Vec<String>> {
         .context("failed to build HTTP client for adblock download")?;
 
     let mut written = download_brave_default_lists(&client, &dir).await?;
-    if written.is_empty() {
-        written = download_fallback_rule_lists(&client, &dir, &mut AdblockRuleManifest::default())
-            .await?;
-    } else if written.len() < MIN_EXPECTED_DEFAULT_LISTS {
-        let mut manifest = load_rule_manifest().unwrap_or_default();
-        let mut supplemented = download_fallback_rule_lists(&client, &dir, &mut manifest).await?;
-        written.append(&mut supplemented);
-    }
+    let mut manifest = load_rule_manifest().unwrap_or_default();
+    let mut supplemented = download_fallback_rule_lists(&client, &dir, &mut manifest).await?;
+    written.append(&mut supplemented);
 
     let resources_path = adblock_resources_file();
     if let Some(parent) = resources_path.parent() {
@@ -557,19 +751,38 @@ pub async fn sync_default_resources() -> Result<Vec<String>> {
         )
     })?;
     written.push(RESOURCES_FILE_NAME.to_string());
+    save_sync_state(&AdblockSyncState {
+        last_success_unix: unix_seconds_now(),
+        profile_version: BRAVE_COMPAT_PROFILE_VERSION,
+    })?;
 
     Ok(written)
 }
 
 pub async fn download_default_rule_lists() -> Result<Vec<String>> {
-    sync_default_resources().await
+    sync_default_resources_if_due(0).await
 }
 
 pub fn classify_request_type(method: &str, headers: &[(String, String)]) -> &'static str {
+    if header_value(headers, "upgrade")
+        .map(|value| value.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
+        && header_value(headers, "connection")
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+            })
+            .unwrap_or(false)
+    {
+        return "websocket";
+    }
+
     if let Some(dest) = header_value(headers, "sec-fetch-dest") {
         match dest.to_ascii_lowercase().as_str() {
             "document" => return "document",
             "iframe" | "frame" => return "subdocument",
+            "websocket" => return "websocket",
             "script" => return "script",
             "style" => return "stylesheet",
             "image" => return "image",
@@ -644,20 +857,19 @@ fn load_rule_engine() -> Result<(Engine, usize)> {
     let mut paths = fs::read_dir(&dir)
         .with_context(|| format!("failed to read adblock rule dir: {}", dir.display()))?
         .filter_map(|entry| entry.ok().map(|item| item.path()))
-        .filter(|path| {
-            path.extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    matches!(
-                        ext.to_ascii_lowercase().as_str(),
-                        "txt" | "list" | "filters" | "filter"
-                    )
-                })
-                .unwrap_or(false)
-        })
+        .filter(|path| is_supported_rule_file(path))
         .collect::<Vec<_>>();
 
     paths.sort();
+    paths.sort_by(|left, right| {
+        let left_custom = is_custom_rule_file(left);
+        let right_custom = is_custom_rule_file(right);
+        match (left_custom, right_custom) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => left.cmp(right),
+        }
+    });
 
     let mut filter_set = FilterSet::new(false);
     let mut rule_count = 0usize;
@@ -715,42 +927,58 @@ async fn download_brave_default_lists(
     let mut seen = HashSet::new();
     let mut sources = Vec::new();
     for entry in catalog {
-        if !entry.default_enabled || entry.hidden {
-            continue;
-        }
-
-        if !entry.platforms.is_empty()
-            && !entry
-                .platforms
-                .iter()
-                .any(|platform| platform.eq_ignore_ascii_case("WINDOWS"))
-        {
+        if !should_include_brave_catalog_entry(&entry) {
             continue;
         }
 
         for source in entry.sources {
-            let format = parse_filter_format(&source.format);
-            if seen.insert(source.url.clone()) {
-                sources.push((source.url, format));
+            if !seen.insert(source.url.clone()) {
+                continue;
             }
+            sources.push(BraveSelectedListSource {
+                title: if source.title.trim().is_empty() {
+                    source
+                        .url
+                        .split('/')
+                        .next_back()
+                        .unwrap_or("Brave filter list")
+                        .to_string()
+                } else {
+                    source.title.clone()
+                },
+                group_title: if entry.title.trim().is_empty() {
+                    entry.uuid.clone()
+                } else {
+                    entry.title.clone()
+                },
+                format: parse_filter_format(&source.format),
+                permission_mask: entry.permission_mask,
+                hidden: entry.hidden,
+                default_enabled: entry.default_enabled,
+                first_party_protections: entry.first_party_protections,
+                url: source.url,
+            });
         }
     }
 
     let mut written = Vec::new();
     let mut manifest_entries = Vec::new();
-    for (index, (url, format)) in sources.iter().enumerate() {
+    let previous_manifest = load_rule_manifest().unwrap_or_default();
+    for (index, source) in sources.iter().enumerate() {
         let response = client
-            .get(url)
+            .get(&source.url)
             .send()
             .await
-            .with_context(|| format!("failed to download Brave adblock list: {url}"))?
+            .with_context(|| format!("failed to download Brave adblock list: {}", source.url))?
             .error_for_status()
-            .with_context(|| format!("Brave adblock list download returned error: {url}"))?;
+            .with_context(|| {
+                format!("Brave adblock list download returned error: {}", source.url)
+            })?;
         let body = response
             .text()
             .await
-            .with_context(|| format!("failed to read Brave adblock list body: {url}"))?;
-        let file_name = catalog_rule_file_name(index + 1, url);
+            .with_context(|| format!("failed to read Brave adblock list body: {}", source.url))?;
+        let file_name = catalog_rule_file_name(index + 1, &source.url);
         let path = dir.join(&file_name);
         fs::write(&path, body).with_context(|| {
             format!(
@@ -760,16 +988,23 @@ async fn download_brave_default_lists(
         })?;
         manifest_entries.push(AdblockRuleManifestEntry {
             file_name: file_name.clone(),
-            source_url: url.clone(),
-            format: *format,
-            permissions: 0,
+            source_url: source.url.clone(),
+            title: source.title.clone(),
+            group_title: source.group_title.clone(),
+            format: source.format,
+            permissions: source.permission_mask,
+            hidden: source.hidden,
+            default_enabled: source.default_enabled,
+            first_party_protections: source.first_party_protections,
         });
         written.push(file_name);
     }
 
-    save_rule_manifest(&AdblockRuleManifest {
+    let manifest = AdblockRuleManifest {
         lists: manifest_entries,
-    })?;
+    };
+    cleanup_replaced_manifest_rule_files(dir, &previous_manifest, &manifest)?;
+    save_rule_manifest(&manifest)?;
 
     Ok(written)
 }
@@ -801,8 +1036,13 @@ async fn download_fallback_rule_lists(
         manifest.lists.push(AdblockRuleManifestEntry {
             file_name: (*file_name).to_string(),
             source_url: (*url).to_string(),
+            title: (*file_name).to_string(),
+            group_title: "RelayGate fallback lists".to_string(),
             format: infer_filter_format_from_name(file_name),
             permissions: 0,
+            hidden: false,
+            default_enabled: true,
+            first_party_protections: false,
         });
         written.push((*file_name).to_string());
     }
@@ -810,6 +1050,58 @@ async fn download_fallback_rule_lists(
     save_rule_manifest(manifest)?;
 
     Ok(written)
+}
+
+fn should_include_brave_catalog_entry(entry: &BraveListCatalogEntry) -> bool {
+    if !entry.default_enabled {
+        return false;
+    }
+
+    entry.platforms.is_empty()
+        || entry.platforms.iter().any(|platform| {
+            matches!(
+                platform.trim().to_ascii_uppercase().as_str(),
+                "WINDOWS" | "DESKTOP"
+            )
+        })
+}
+
+fn cleanup_replaced_manifest_rule_files(
+    dir: &PathBuf,
+    previous: &AdblockRuleManifest,
+    next: &AdblockRuleManifest,
+) -> Result<()> {
+    let keep = next
+        .lists
+        .iter()
+        .map(|item| item.file_name.as_str())
+        .collect::<HashSet<_>>();
+
+    for item in &previous.lists {
+        if keep.contains(item.file_name.as_str()) || item.file_name == CUSTOM_RULE_FILE_NAME {
+            continue;
+        }
+        let path = dir.join(&item.file_name);
+        if path.exists() && is_supported_rule_file(&path) && !is_custom_rule_file(&path) {
+            fs::remove_file(&path).with_context(|| {
+                format!("failed to remove replaced adblock list: {}", path.display())
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn display_rule_title(entry: &AdblockRuleManifestEntry) -> String {
+    match (
+        entry.group_title.trim().is_empty(),
+        entry.title.trim().is_empty(),
+    ) {
+        (false, false) => format!("{} / {}", entry.group_title, entry.title),
+        (false, true) => entry.group_title.clone(),
+        (true, false) => entry.title.clone(),
+        (true, true) => entry.source_url.clone(),
+    }
 }
 
 fn catalog_rule_file_name(index: usize, url: &str) -> String {
@@ -963,6 +1255,51 @@ fn parse_filter_format(value: &str) -> FilterFormat {
     }
 }
 
+fn reset_generated_rule_files() -> Result<()> {
+    let dir = adblock_rules_dir();
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read adblock rule dir: {}", dir.display()))?
+    {
+        let path = entry
+            .with_context(|| format!("failed to read adblock rule entry: {}", dir.display()))?
+            .path();
+        if is_supported_rule_file(&path) && !is_custom_rule_file(&path) {
+            fs::remove_file(&path).with_context(|| {
+                format!(
+                    "failed to remove generated adblock rule file: {}",
+                    path.display()
+                )
+            })?;
+        }
+    }
+
+    let manifest_path = adblock_rule_manifest_file();
+    if manifest_path.exists() {
+        fs::remove_file(&manifest_path).with_context(|| {
+            format!(
+                "failed to remove adblock rule manifest: {}",
+                manifest_path.display()
+            )
+        })?;
+    }
+
+    let sync_state_path = adblock_sync_state_file();
+    if sync_state_path.exists() {
+        fs::remove_file(&sync_state_path).with_context(|| {
+            format!(
+                "failed to remove adblock sync state: {}",
+                sync_state_path.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
 fn load_rule_manifest() -> Result<AdblockRuleManifest> {
     let path = adblock_rule_manifest_file();
     if !path.exists() {
@@ -982,6 +1319,70 @@ fn save_rule_manifest(manifest: &AdblockRuleManifest) -> Result<()> {
         .context("failed to serialize adblock rule manifest")?;
     fs::write(&path, content)
         .with_context(|| format!("failed to write adblock rule manifest: {}", path.display()))
+}
+
+fn adblock_sync_due(interval_secs: u64) -> bool {
+    if interval_secs == 0 {
+        return true;
+    }
+    let Ok(state) = load_sync_state() else {
+        return true;
+    };
+    if state.profile_version < BRAVE_COMPAT_PROFILE_VERSION {
+        return true;
+    }
+    let now = unix_seconds_now();
+    state.last_success_unix == 0 || now.saturating_sub(state.last_success_unix) >= interval_secs
+}
+
+fn default_resources_present() -> bool {
+    default_rule_files_present() && adblock_resources_file().exists()
+}
+
+fn default_rule_files_present() -> bool {
+    let dir = adblock_rules_dir();
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return false;
+    };
+
+    entries
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| is_supported_rule_file(path))
+        .any(|path| !is_custom_rule_file(&path))
+}
+
+fn load_sync_state() -> Result<AdblockSyncState> {
+    let path = adblock_sync_state_file();
+    if !path.exists() {
+        return Ok(AdblockSyncState::default());
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read adblock sync state: {}", path.display()))?;
+    serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse adblock sync state: {}", path.display()))
+}
+
+fn save_sync_state(state: &AdblockSyncState) -> Result<()> {
+    let path = adblock_sync_state_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create adblock sync state dir: {}",
+                parent.display()
+            )
+        })?;
+    }
+    let content =
+        serde_json::to_string_pretty(state).context("failed to serialize adblock sync state")?;
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write adblock sync state: {}", path.display()))
+}
+
+fn unix_seconds_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 struct PreparedAdblockRequest {
@@ -1575,12 +1976,92 @@ fn adblock_rules_dir() -> PathBuf {
     preferred_base_dir().join("data").join("adblock")
 }
 
+fn ensure_custom_rule_file() -> Result<PathBuf> {
+    let path = adblock_rules_dir().join(CUSTOM_RULE_FILE_NAME);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create adblock custom rule directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    if !path.exists() {
+        fs::write(&path, CUSTOM_RULE_FILE_HEADER).with_context(|| {
+            format!(
+                "failed to create adblock custom rule file: {}",
+                path.display()
+            )
+        })?;
+    }
+
+    Ok(path)
+}
+
+fn is_custom_rule_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case(CUSTOM_RULE_FILE_NAME))
+        .unwrap_or(false)
+}
+
+fn is_supported_rule_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "txt" | "list" | "filters" | "filter"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn adblock_resources_file() -> PathBuf {
     adblock_rules_dir().join(RESOURCES_FILE_NAME)
 }
 
+fn adblock_debug_log_file() -> PathBuf {
+    preferred_base_dir()
+        .join("data")
+        .join("logs")
+        .join("adblock-debug.log")
+}
+
+fn write_adblock_debug_event(event: Value) -> Result<()> {
+    let path = adblock_debug_log_file();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create adblock debug log directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open adblock debug log: {}", path.display()))?;
+    writeln!(file, "{}", event)
+        .with_context(|| format!("failed to write adblock debug log: {}", path.display()))
+}
+
+fn adblock_mode_name(mode: AdblockMode) -> &'static str {
+    match mode {
+        AdblockMode::Standard => "standard",
+        AdblockMode::Aggressive => "aggressive",
+    }
+}
+
 fn adblock_rule_manifest_file() -> PathBuf {
     adblock_rules_dir().join(RULE_MANIFEST_FILE_NAME)
+}
+
+fn adblock_sync_state_file() -> PathBuf {
+    adblock_rules_dir().join(SYNC_STATE_FILE_NAME)
 }
 
 fn preferred_base_dir() -> PathBuf {
@@ -1596,4 +2077,26 @@ fn executable_base_dir() -> Result<PathBuf> {
         anyhow::anyhow!("current executable path does not have a parent directory")
     })?;
     Ok(parent.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_request_type;
+
+    #[test]
+    fn classify_websocket_from_fetch_dest() {
+        let headers = vec![("Sec-Fetch-Dest".to_string(), "websocket".to_string())];
+
+        assert_eq!(classify_request_type("GET", &headers), "websocket");
+    }
+
+    #[test]
+    fn classify_websocket_from_h1_upgrade_headers() {
+        let headers = vec![
+            ("Connection".to_string(), "keep-alive, Upgrade".to_string()),
+            ("Upgrade".to_string(), "websocket".to_string()),
+        ];
+
+        assert_eq!(classify_request_type("GET", &headers), "websocket");
+    }
 }

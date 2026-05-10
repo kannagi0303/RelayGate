@@ -3,14 +3,22 @@ use std::{cell::RefCell, rc::Rc};
 use anyhow::{Context, Result};
 use lol_html::{element, rewrite_str, text, RewriteStrSettings};
 
-use crate::config::{MinimalPageMode, MountSiteConfig};
+use crate::{
+    config::{MinimalPageMode, MountSiteConfig},
+    html_codec::DecodedHtml,
+};
 
 /// Apply a very small HTML link rewrite layer.
-/// The goal is to keep users inside the local mount path after they enter through `/sukebei/`.
+/// The goal is to keep users inside the local mount path after they enter through `/site/`.
 ///
 /// This is not a full HTML parser. If more stability is needed later, replace it with a real DOM or HTML rewrite flow.
-pub fn rewrite_html_links(body: &[u8], mount: &MountSiteConfig) -> Result<Vec<u8>> {
-    let html = String::from_utf8_lossy(body).to_string();
+pub fn rewrite_html_links(
+    body: &[u8],
+    content_type: Option<&str>,
+    mount: &MountSiteConfig,
+) -> Result<Vec<u8>> {
+    let decoded = DecodedHtml::decode(body, content_type);
+    let html = decoded.text().to_string();
     let origin = mount.target_base_url.trim_end_matches('/');
     let mount_prefix = mount.mount_path.trim_end_matches('/');
     let origin_host = origin
@@ -175,7 +183,7 @@ pub fn rewrite_html_links(body: &[u8], mount: &MountSiteConfig) -> Result<Vec<u8
     rewritten = rewritten.replace(r#"url("/"#, &format!(r#"url("{mount_prefix}/"#));
     rewritten = rewritten.replace(r#"url('/"#, &format!(r#"url('{mount_prefix}/"#));
 
-    Ok(rewritten.into_bytes())
+    Ok(decoded.encode(&rewritten))
 }
 
 /// Render a minimal HTML page for a site-specific mode instead of keeping the original DOM.
@@ -225,7 +233,7 @@ pub fn rewrite_location_header(location: &str, mount: &MountSiteConfig) -> Strin
 /// This helps local mount mode work more reliably.
 /// The first version uses a conservative strategy:
 /// - remove `Domain` so the cookie falls back to host-only
-/// - rewrite `Path=/xxx` to the mount prefix such as `/sukebei/xxx`
+/// - rewrite `Path=/xxx` to the mount prefix such as `/site/xxx`
 pub fn rewrite_set_cookie_header(set_cookie: &str, mount: &MountSiteConfig) -> String {
     let mount_prefix = mount.mount_path.trim_end_matches('/');
     let mut parts = Vec::new();

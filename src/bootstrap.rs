@@ -9,9 +9,16 @@ use crate::{
 };
 
 #[cfg(not(debug_assertions))]
-use std::fs;
-#[cfg(all(windows, not(debug_assertions)))]
-use std::{env, path::PathBuf};
+use std::{
+    env, fs,
+    fs::OpenOptions,
+    io::{self, Write},
+    path::PathBuf,
+};
+#[cfg(not(debug_assertions))]
+use tracing::Level;
+#[cfg(not(debug_assertions))]
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 #[cfg(windows)]
 use windows_sys::Win32::{
     Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
@@ -25,8 +32,8 @@ pub async fn run(mode: AppPathMode) -> Result<()> {
     let Some(_single_instance_guard) = acquire_single_instance_guard()? else {
         let proxy_listen = RelayGateConfig::load_default_or_builtin()
             .map(|(config, _)| config.proxy.listen)
-            .unwrap_or_else(|_| "0.0.0.0:8787".to_string());
-        let _ = open_control_panel(&proxy_listen);
+            .unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+        let _ = open_control_panel(&proxy_listen, "/");
         return Ok(());
     };
 
@@ -66,27 +73,83 @@ fn init_tracing() {
 
     #[cfg(not(debug_assertions))]
     {
-        let log_dir = release_log_dir().unwrap_or_else(|_| PathBuf::from("data").join("logs"));
-        let _ = fs::create_dir_all(&log_dir);
-        let file_appender = tracing_appender::rolling::never(log_dir, "relaygate.log");
+        let log_file = release_log_file()
+            .unwrap_or_else(|_| PathBuf::from("data").join("logs").join("relaygate.log"));
+        let file_appender = LazyLogFile { path: log_file };
 
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .with_target(true)
             .with_ansi(false)
             .compact()
-            .with_writer(file_appender)
+            .with_writer(file_appender.with_max_level(Level::ERROR).or_else(io::sink))
             .init();
     }
 }
 
-#[cfg(all(windows, not(debug_assertions)))]
-fn release_log_dir() -> Result<PathBuf> {
+#[cfg(not(debug_assertions))]
+#[derive(Clone)]
+struct LazyLogFile {
+    path: PathBuf,
+}
+
+#[cfg(not(debug_assertions))]
+struct LazyLogWriter {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+#[cfg(not(debug_assertions))]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LazyLogFile {
+    type Writer = LazyLogWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LazyLogWriter {
+            path: self.path.clone(),
+            file: None,
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl Write for LazyLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.file()?.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl LazyLogWriter {
+    fn file(&mut self) -> io::Result<&mut fs::File> {
+        if self.file.is_none() {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?,
+            );
+        }
+        Ok(self.file.as_mut().expect("lazy log file initialized"))
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn release_log_file() -> Result<PathBuf> {
     let exe = env::current_exe()?;
     let base_dir = exe.parent().ok_or_else(|| {
         anyhow::anyhow!("current executable path does not have a parent directory")
     })?;
-    Ok(base_dir.join("data").join("logs"))
+    Ok(base_dir.join("data").join("logs").join("relaygate.log"))
 }
 
 #[cfg(windows)]
@@ -133,8 +196,8 @@ impl Drop for SingleInstanceGuard {
     }
 }
 
-fn open_control_panel(web_listen: &str) -> Result<()> {
-    let url = format!("http://{}/", browser_open_address(web_listen));
+fn open_control_panel(web_listen: &str, path: &str) -> Result<()> {
+    let url = format!("http://{}{}", browser_open_address(web_listen), path);
     #[cfg(windows)]
     {
         let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();

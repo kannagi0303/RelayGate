@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use ico::IconDir;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
     Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
@@ -58,7 +58,7 @@ impl TrayHandle {
                 PostThreadMessageW(thread_id, WM_APP + 1, 0, 0);
             }
         }
-        info!("tray handle shutdown requested");
+        debug!("tray handle shutdown requested");
     }
 }
 
@@ -98,14 +98,6 @@ impl SystemTray {
 
 impl TrayController for SystemTray {
     fn start(&self, command_tx: mpsc::UnboundedSender<TrayCommand>) -> Result<TrayHandle> {
-        if !self.config.tray.enabled {
-            info!("tray disabled by config");
-            return Ok(TrayHandle {
-                shutdown_flag: Arc::new(AtomicBool::new(false)),
-                thread_id: Arc::new(AtomicU32::new(0)),
-            });
-        }
-
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_id = Arc::new(AtomicU32::new(0));
         let thread_shutdown_flag = shutdown_flag.clone();

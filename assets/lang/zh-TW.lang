@@ -1,0 +1,631 @@
+meta:
+  locale: zh-TW
+  name: 繁體中文
+  version: 1
+
+common:
+  none: 無
+  yes: 是
+  no: 否
+  enabled: 已啟用
+  disabled: 已停用
+  auto: 自動
+  save: 儲存
+  enable: 啟用
+  disable: 停用
+  delete: 刪除
+  action: 操作
+  move_up: 上移
+  move_down: 下移
+  item: 項目
+  value: 值
+  desc: 說明
+  file: 檔名
+  size: 大小
+  bytes: bytes
+  status: 狀態
+  proxy: Proxy
+  web: Web
+  host: Host
+  cooldown: Cooldown
+  direction: 方向
+  example: 範例
+  duty: 責任
+  model: 資料模型
+  rule: 原則
+  latest: 最近狀態
+  learned: 學習值
+
+app:
+  title: 設定
+  hint: 本地設定頁 v1。先偏重狀態觀察與單項設定。
+  online: 已連線
+  offline: 已離線
+  admin_navigation: RelayGate 後台導覽
+
+nav:
+  system: 系統
+  connection_routing: 連線與路由
+  content_processing: 內容處理
+  extensions: 擴充功能
+  core: 內容處理
+  content: 內容處理
+  status: 總覽
+  settings: 設定
+  traffic: 流量調度
+  upstreams: 上游代理
+  upstream_routes: 上游規則
+  dns: DNS
+  gateway: 網站掛載
+  patch: 頁面修補
+  render: 頁面重構
+  resource_replace: 資源替換
+  adblock: 廣告封鎖
+  user_script: 使用者腳本
+
+tray:
+  open: 開啟控制台
+  reload: 重新讀取
+  exit: 結束
+
+settings:
+  locale:
+    label: 語言
+  proxy:
+    label: Proxy 位址
+    note: 修改後需之後接熱套用或重啟。
+  adblock:
+    label: 追蹤器與廣告封鎖
+    note: 選擇關閉過濾、使用 Brave 標準行為，或使用會包含第一方請求的積極過濾。
+  protocol:
+    title: 協定優先順序
+    apply_note: 設定會寫入 relaygate.yaml。現有 proxy listener 仍使用啟動時設定；要確定套用協定變更，請重啟 RelayGate。
+    upstream:
+      label: 上游協定
+      note: RelayGate 到來源站。自動模式相容性最好；guarded H3 改為明確選擇。
+      auto: 自動 HTTP/1 或 HTTP/2
+      http1: 強制 HTTP/1
+      http2: 優先 HTTP/2（ALPN）
+      h3: 優先 guarded HTTP/3
+    downstream:
+      label: 下游協定
+      note: 瀏覽器到 RelayGate MITM。HTTP/1 對 WebSocket 相容性最安全。
+      http1: 僅 HTTP/1
+      http2: 允許 HTTP/2
+
+adblock:
+  mode:
+    off: 已停用
+    std: 標準
+    agg: 積極
+  page:
+    sub: RelayGate 使用 Brave 相容的封鎖資料，並固定採用積極模式。清單與資源會在背景自動同步 Brave 預設來源；按下手動更新時，也會立刻下載並直接重載套用。
+    apply_note: 模式、偵錯與規則熱重載會直接套用到後續請求；已送出的頁面資源請重新整理頁面驗證。
+  feature: 功能狀態
+  update:
+    label: 規則更新
+    note: 背景會自動同步 Brave 的預設 lists / resources。若想立即刷新，可直接按手動更新。
+    brave_note: 會依 Brave list catalog 載入預設清單，包含 hidden default 與 first-party protection 類清單；更新後會自動重新載入廣告封鎖 runtime。
+    auto: 自動
+    now: 手動更新
+  rules:
+    label: 規則來源
+    source: 清單來源
+    tags: 標籤
+    sub: 目前已載入 <strong id="adblock-rule-count">0</strong> 條規則，以及 <strong id="adblock-resource-count">0</strong> 份資源。RelayGate 目前固定使用積極過濾。
+    none: 目前沒有規則檔。請先下載預設規則，或手動放入 `.txt` / `.list` / `.filter` / `.filters` 檔案。
+  resources:
+    label: 資源檔
+    source: 來源
+    none: 目前沒有 resources.json。redirect / scriptlet 資源尚未載入。
+  troubleshooting:
+    title: 疑難排解
+    disable_fast_path: 停用 MITM 快速路徑
+    fast_path_note: 開啟後，MITM 回應會強制進入完整 body pipeline，用來檢查廣告封鎖 / Rewrite / 使用者腳本是否被 fast path 放過。可能降低效能，只建議除錯時使用。
+    debug_log: 記錄廣告封鎖判斷日誌
+    debug_log_note: 開啟後會把 request type、third-party 判定、命中規則與例外寫到 data/logs/adblock-debug.log。只建議短時間排查使用。
+  custom_rules:
+    title: 自訂規則
+    note: 編輯 {file}，再按「熱重載」即可套用。custom.txt 會最後載入，適合補 Brave 有擋、目前清單沒命中的規則。
+    open_folder: 開啟規則資料夾
+    reload: 熱重載廣告封鎖規則
+  help:
+    markdown: |
+      ### 廣告封鎖
+
+      廣告封鎖使用 Brave 相容資料，並套用到後續請求。
+
+      ### 模式
+
+      可切換停用、標準或積極模式。模式變更會影響之後載入的頁面資源。
+
+      ### 規則與資源
+
+      規則清單與資源檔會顯示目前載入來源。自訂規則可放在規則資料夾中，修改後請熱重載。
+
+      ### 疑難排解
+
+      快速路徑與偵錯日誌只建議在排查問題時短時間使用。
+
+status_page:
+  title: 總覽
+  sub: 這一頁目前偏向看全域狀態與已載入能力，不再維持近期連線追蹤。
+  dashboard: Dashboard
+  overview: 查看 RelayGate 目前的執行狀態、DNS、上游代理與網站掛載概要。
+  sampling: 取樣中
+  runtime_state: 執行狀態
+  running: 執行中
+  frontend_state: "前端 {state}"
+  uptime: 執行時間
+  uptime_note: 前端每秒推進，後端定期對時
+  listen: 監聽位置
+  https_auto: HTTPS 處理：自動
+  resource_usage: 資源使用
+  baseline: Baseline
+  runtime: Runtime
+  loaded: 已載入
+  passive: 被動
+  module_summary: 功能模組概要
+  environment_summary: 環境概要
+  dns_profile_summary: DNS Profile 概要
+  upstream_summary: 上游代理概要
+  gateway_summary: 網站掛載概要
+  resource_count: "{count} 份資源"
+  total_count: "共 {count} 個"
+  enabled_count: "{count} 個啟用"
+  mount_count: "{count} 個掛載"
+  rules_loaded: 已載入規則
+  entries: 筆資料
+  latency: 延遲
+  quality: 品質
+  routes: 規則
+  passive_stats_pending: 被動統計待加入
+  mitm: 中介
+  rewrite: 網站改寫
+  adblock: 廣告封鎖
+  resource_replace: 資源替換
+  summary: 系統摘要
+  upstreams: 上游
+  upstream_routes: 上游規則
+  rules: 代理規則
+
+settings_page:
+  title: 設定
+  sub: 這一版先偏單項單項編輯。儲存時會直接改寫 `relaygate.yaml`。
+  intro: 連線協定、CA 信任與 RelayGate 關閉操作集中在這裡。狀態頁只保留即時概要。
+  basic: 基本設定
+  language:
+    title: 語言
+    body: 後台語言會寫入 relaygate.yaml，並立即熱切換。系統沒有設定時預設使用英文。
+    option:
+      en-US: English
+      zh-TW: 繁體中文
+  protocol:
+    title: 上下游協定
+    body: 上游用「最高允許協定」收斂：HTTP/3 會自動回退；HTTP/2 / HTTP/1.1 會停用新的 H3 fast path。
+    apply_note: 上游設定會套用到新的對外連線；下游 H1/H2 牽涉瀏覽器已建立的 TLS/ALPN 連線，會在瀏覽器重新建立連線後完整生效。
+    upstream_limit: 上游協定上限
+    option_guarded_h3: HTTP/3 優先
+    option_http2_http1: HTTP/2 / HTTP/1.1
+    upstream_note: RelayGate → 網站 / 上游代理。切到 HTTP/2 / HTTP/1.1 後，新請求不再嘗試 H3，既有 stream 會自然結束。
+    downstream: 下游連線
+    option_http2_enabled: 標準：允許 HTTP/2
+    option_http1_only: 相容：僅 HTTP/1.1
+    downstream_note: 瀏覽器 → RelayGate。遇到瀏覽器端 H2 stream 異常時，再切成僅 HTTP/1.1。
+  ca:
+    title: CA 狀態與操作
+    body: HTTPS 處理模式固定為「自動」。RelayGate 會依站點與規則選擇解密處理或 tunnel；這裡只管理 CA 是否已建立與是否受 Windows 信任。
+    file: CA 檔案
+    windows_user_root: Windows 使用者根憑證
+    cert_path: 憑證路徑
+    file_ready: 已建立
+    file_partial: 不完整
+    file_missing: 未建立
+    trusted: 已信任
+    untrusted: 未信任
+    unknown: 未知
+    windows_list_title: Windows 中的 RelayGate CA
+    windows_list_note: 這裡列出 Windows 信任根中 subject 或 issuer 含 RelayGate 的憑證。逐筆移除可清理舊版本或其他資料夾留下的信任紀錄。
+    no_windows_ca: 目前沒有偵測到 Windows 信任根中的 RelayGate CA。
+    current_ca: 目前 CA
+    other_ca: 其他 RelayGate CA
+    remove_this: 移除這張
+    table:
+      store: 位置
+      identity: 身分
+      thumbprint: Thumbprint
+      expires: 到期
+      action: 操作
+  exit:
+    title: 結束 RelayGate
+    body: 關閉後，瀏覽器若仍指向 RelayGate 代理，網頁會無法連線。確認不再使用時再執行。
+  actions:
+    title: 操作
+    sub: 現階段先提供安全且常用的操作。重啟先不做。
+    reload_rules: 重讀 Rewrite 規則
+    reload_config: 重讀設定檔
+    exit: 結束 RelayGate
+
+traffic_page:
+  title: 流量調度
+  sub: 這裡之後會承接同站請求調度、429 cooldown、queue 與 retry 類設定。這一頁目前先作為獨立分區骨架。
+  mode: 模式
+  active: 執行中請求
+  queued: 排隊中請求
+  cooling: 冷卻中 host
+  strategy: 第一版策略
+  cooldown: 初始 cooldown
+  interval: 初始放行間隔
+  max_queue: 每 host 佇列上限
+  hosts: 受控 host 數量
+  position: 定位
+  host:
+    title: Host 狀態
+    in_flight: 執行中
+    queued: 排隊中
+    latest: 最近狀態
+    learned: 學習值
+    none: 目前尚無調度資料。
+  help:
+    markdown: |
+      ### 流量調度
+
+      流量調度負責 request admission、節流、排隊、延後重試與同站放行策略。
+
+      ### Host 狀態
+
+      表格顯示目前受控 host 的執行中請求、排隊請求、冷卻狀態與最近狀態。
+
+      ### 分責
+
+      這裡不處理 response content rewrite，與頁面修補、頁面重構分開。
+
+upstreams_page:
+  title: 上游代理
+  sub: 管理 host 路由會使用的上游 proxy profiles。此設定寫入 `data/upstreams.yaml`，並會立即套用到執行中的 proxy。
+  add: 新增上游
+  list: 上游清單
+  address: 位址
+  address_note: 目前只支援 `http://host:port` 格式的上游 proxy。
+  apply_note: 上游代理變更會熱套用到新請求；已經建立中的對外連線會自然結束後才完全切換。
+  none: 目前沒有上游 proxy。
+  summary:
+    upstreams: 上游代理
+  help:
+    markdown: |
+      ### 上游代理
+
+      輸入上游代理位址後會新增到列表中，目前支援 `http://host:port`。
+
+      ### 使用方式
+
+      上游代理本身只代表可用的出口。要讓特定網站走指定代理，請到「上游規則」新增網域規則。
+
+      ### 套用時機
+
+      變更會套用到新請求；已建立中的連線會自然結束後才完全切換。
+
+upstream_routes_page:
+  title: 上游規則
+  sub: 使用 wildcard pattern 比對 request host，命中後交給指定上游 proxy。路由依照清單順序判斷。
+  add: 新增路由
+  list: 路由清單
+  pattern: Host Pattern
+  pattern_note: 範例：`example.com`、`www.example.com`、`*.example.com`。
+  upstream: 上游
+  upstream_note: 選擇已啟用的上游 proxy。
+  apply_note: 上游規則變更會熱套用到新請求，適合快速排查特定網站是否該走代理或直連。
+  none: 目前沒有上游規則。
+  missing_upstream: 上游代理不存在
+  summary:
+    routes: 上游規則
+  help:
+    markdown: |
+      ### 上游規則
+
+      上游規則用來指定特定網站要走哪一個上游代理。
+
+      ### Host Pattern
+
+      可使用 `example.com`、`www.example.com`、`*.example.com`。
+
+      ### 上游代理
+
+      下拉選單顯示代理位址，不顯示內部 ID。若原本選到的代理已被刪除，該規則會顯示為不存在。
+
+dns_page:
+  title: DNS
+  sub: 管理 RelayGate 使用的 DNS profiles 與 host routes。此設定寫入 `data/dns.yaml`，並會套用到 direct HTTP、CONNECT、MITM 與網站掛載請求。
+  apply_note: DNS 設定會熱套用到新請求，並清空正負快取，避免切換後仍吃到舊解析結果。
+  cache: Cache
+  add_profile: 新增 DNS Profile
+  add_route: 新增 DNS Route
+  profiles: DNS Profiles
+  routes: DNS Routes
+  profile_id: Profile ID
+  profile_id_note: 短 ID，例如 `cloudflare` 或 `custom-direct`。
+  mode: 模式
+  mode_note: "`system` 使用系統 DNS。`udp` 使用 server 清單。"
+  servers: Server
+  servers_note: 以 `IP:Port` 表示 DNS server；Port 未指定時通常使用 53。
+  fallback: Fallback Profiles
+  fallback_note: 以逗號分隔 profile IDs。strict route 不會自動 fallback 到 system。
+  pattern: Host Pattern
+  pattern_note: 範例：`example.com`、`www.example.com`、`*.example.com`。
+  profile: Profile
+  profile_note: 選擇已啟用 DNS profile。
+  strict: Strict
+  profiles_none: 目前沒有 DNS profiles。
+  routes_none: 目前沒有 DNS routes。
+
+dns:
+  title: DNS 設定
+  subtitle: 管理 DNS 設定檔與 DNS 路由。
+  status:
+    runtime: DNS 狀態
+    profiles: DNS 設定檔
+    routes: DNS 路由
+    enabled_total: 啟用 / 總數
+  actions:
+    profiles: 新增 DNS 設定檔
+    routes: 新增 DNS 路由
+    add_profile: 新增設定檔
+    add_route: 新增路由
+  fields:
+    service: 服務
+    ip: IP
+    port: Port
+    pattern: 網域樣式
+  tables:
+    profiles: DNS 設定檔
+    routes: DNS 路由
+  cols:
+    service: 服務
+    ip: IP
+    port: Port
+    pattern: 網域樣式
+    status: 狀態
+    action: 操作
+  placeholders:
+    ip: IP 位址
+  empty:
+    profiles: 目前沒有 DNS 設定檔。
+    routes: 目前沒有 DNS 路由。
+  generated: 自動產生
+  routes:
+    missing_profile: 設定檔不存在
+  help:
+    title: 說明
+    markdown: |
+      ### DNS 設定檔
+
+      輸入 DNS Server IP 後會新增到列表中，`Port` 未填時使用 `53`。
+
+      - 查詢優先順序依列表由上而下
+      - 指定設定檔失敗時，會依目前列表順序繼續查詢
+      - 最後會回到系統 DNS
+
+      ### DNS 路由
+
+      這裡用來指定特定網站要優先使用哪一個 DNS 設定檔。
+
+      - 每條路由都會先查詢指定的設定檔
+      - 指定設定檔失敗時，RelayGate 會依 DNS 設定檔順序繼續嘗試
+      - 所有自訂設定檔都失敗後，最後回到系統 DNS
+
+      ### 網域樣式
+
+      `Host Pattern` 可使用下列形式：
+
+      - `example.com`：精準比對單一網域
+      - `www.example.com`：精準比對完整主機名稱
+      - `*.example.com`：比對所有子網域
+
+gateway_page:
+  title: 網站掛載
+  sub: 將遠端網站掛到本機 URL path 底下。RelayGate 會經過一般管線抓取遠端內容，並把連結改寫回 mount path。
+  add: 新增網站掛載
+  list: 網站掛載清單
+  mount_path: 掛載路徑
+  mount_path_note: proxy listener 上的本機路徑。範例：`/site/`。
+  target: 目標 Base URL
+  target_note: 遠端網站 base URL。範例：`https://example.com`。
+  upstream: 上游
+  upstream_note: 可選。此 mount 要使用的上游 proxy。
+  rewrite_links: Rewrite links
+  rewrite_links_note: 讓後續瀏覽與資源 URL 盡量維持在本機 mount path 下面。
+  none: 目前沒有網站掛載。
+  missing_upstream: 上游代理不存在
+  summary:
+    mounts: 網站掛載
+  help:
+    markdown: |
+      ### 網站掛載
+
+      網站掛載會把遠端網站放到本機路徑底下，例如 `/site/`。
+
+      ### 目標網址
+
+      目標 Base URL 需要是 `http://` 或 `https://` 開頭的遠端網站。
+
+      ### 上游代理
+
+      可選擇是否讓這個掛載走指定上游代理。未選擇時會使用一般直連流程。
+
+      ### Rewrite links
+
+      啟用後會盡量把後續連結與資源 URL 留在本機掛載路徑下。
+
+patch_page:
+  title: 頁面修補
+  sub: 這裡承接 upstream response 的局部修補，例如 JSON key 清理、HTML 內 JS 變數值回寫、header 調整。
+  current: 目前方向
+  path: 規則路徑
+  cases: 已驗證案例
+  help:
+    markdown: |
+      ### 頁面修補
+
+      頁面修補用來處理上游回應中的局部內容，例如 JSON 欄位、HTML 片段或特定變數值。
+
+      ### 規則位置
+
+      規則放在頁面顯示的規則路徑中。修改規則後，使用「重讀 Rewrite 規則」套用。
+
+render_page:
+  title: 頁面重構
+  sub: 這裡維持 extract -> render 的定位，適合需要抽資料後重建輸出的站點。
+  current: 目前方向
+  path: 規則路徑
+  help:
+    markdown: |
+      ### 頁面重構
+
+      頁面重構適合需要先抽取資料，再用模板重建輸出的網站。
+
+      ### 規則位置
+
+      規則放在頁面顯示的規則路徑中。修改規則後，使用「重讀 Rewrite 規則」套用。
+
+resource_replace_page:
+  title: 資源替換
+  sub: 在 request 抵達 upstream server 前，將命中的遠端資源替換成本機檔案。
+  current: 目前規則
+  path: 資源路徑
+  rules: 已啟用 / 總數
+  list: 規則清單
+  reload: 重讀資源規則
+  source: Source
+  apply_note: 切換規則會自動重新載入並熱套用；外部手改檔案時再按重載。
+  none: 目前沒有資源替換規則。
+  help:
+    markdown: |
+      ### 資源替換
+
+      資源替換會在 request 抵達上游網站前，把命中的遠端資源替換成本機檔案。
+
+      ### 規則
+
+      表格顯示可辨識的 host、來源條件、檔案與大小；內部規則 ID 不作為主要使用者欄位。
+
+      ### 套用時機
+
+      切換規則會自動熱套用。外部手動修改規則檔時，請按「重讀資源規則」。
+
+user_script_page:
+  title: 使用者腳本
+  sub: 管理放在 `data/user_script/` 的本機 `.user.js` 檔案。啟用後只會影響之後載入且符合 scope 的 HTML 文件。
+  rescan: 重新掃描
+  open_folder: 開啟腳本資料夾
+  apply_note: 啟用 / 停用會自動重新掃描並熱套用；外部手改檔案時再按重新掃描。
+  script_name: 腳本名稱
+  version: 版本
+  match_scope: Match 範圍
+  list: 腳本清單
+  summary:
+    scripts: 使用者腳本
+  support:
+    supported: RelayGate 可以正常處理這項能力。
+    partial: RelayGate 以不同實作提供相容行為，因此不保證完全等價。
+    unsupported: RelayGate 目前尚未提供這項能力，腳本可能無法完整運作。
+    error: RelayGate 無法解析這個腳本到可執行程度。
+  support_label:
+    supported: 支援
+    partial: 部分支援
+    unsupported: 尚未支援
+    error: 錯誤
+  intro:
+    title: 功能介紹
+    body: 使用者腳本 v1 會掃描 `data/user_script/` 底下的本機檔案，將啟用檔名記錄在 `enabled.yaml`，並把符合範圍的腳本注入可修改的 HTML 文件回應。這是相容支援，不是完整 userscript manager。
+  help:
+    markdown: |
+      ### 使用者腳本
+
+      使用者腳本會掃描本機 `.user.js` 檔案，並在符合範圍的 HTML 文件中注入。
+
+      ### 支援狀態
+
+      `支援` 代表 RelayGate 可以正常處理；`部分支援` 代表以相容方式處理；`尚未支援` 不代表禁止啟用；`錯誤` 才代表無法操作。
+
+      ### 套用時機
+
+      啟用、停用或重新掃描會套用到之後載入的頁面。
+
+ca:
+  title: CA 憑證
+  cert:
+    label: 憑證位置
+    note: 目前使用中的 RelayGate CA 憑證路徑。
+  key:
+    label: 私鑰位置
+    note: 目前使用中的 RelayGate CA 私鑰路徑。
+  trust:
+    label: Windows 信任
+    note: 目前使用者的 Root store 是否仍信任這張 CA。
+    install: 安裝 CA 到 Windows
+    remove: 解除信任 CA
+
+backend:
+  reload:
+    adblock_fail: "重讀廣告封鎖規則失敗：{error}"
+    rules_ok: "Rewrite 規則已重讀，目前載入 {rule_count} 份；廣告封鎖規則已載入 {adblock_rule_count} 條，資源已載入 {adblock_resource_count} 份。"
+    rules_fail: "重讀 rewrite 規則失敗：{error}"
+  config:
+    adblock_fail: "設定檔已讀入，但廣告封鎖規則重載失敗：{error}"
+    ok: 設定檔已重新讀取並套用到控制台記憶體狀態。執行中的 listener 與核心行為仍需未來再接熱套用。
+    fail: "設定檔重新讀取失敗：{error}"
+  sync:
+    reload_fail: "規則已同步，但重載失敗：{error}"
+    ok: "已同步 Brave 預設 lists / resources：{files}，目前共載入 {rule_count} 條規則與 {resource_count} 份資源。"
+    fail: "同步 Brave 規則失敗：{error}"
+  ca:
+    ok: 已完成本地 CA 準備，並已安裝到 Windows 信任根。
+    unverified: 安裝動作已執行，但目前仍未在 Windows 信任根中確認到這張 CA。
+    fail: "安裝 CA 到 Windows 失敗：{error}"
+    remove_fail: "解除信任 CA 失敗：{error}"
+    no_cert: 目前沒有本地 CA 憑證檔，無法解除信任。
+    no_diag: 無法取得額外診斷
+    kept: 已從 Windows 信任根解除 RelayGate CA，本地 CA 檔案仍保留。
+    other_removed: 已從 Windows 信任根移除選取的 RelayGate CA。
+    thumb_fail: "無法讀取本地 CA thumbprint：{stderr}"
+    still:
+      diag: "CA 仍存在於：{path}；診斷：{details}"
+      result: "CA 仍存在於：{path}；處理結果：{result}；診斷：{details}"
+      remove: "CA 仍存在於：{path}；處理結果：{result}；移除細節：{remove_details}；診斷：{details}"
+      store: "{store_label} 移除後仍有殘留（{stdout}）"
+  exit:
+    ok: 已送出結束要求，RelayGate 即將關閉。
+  save:
+    fail: "儲存失敗：{error}"
+    ok: "已儲存 {setting}。"
+
+traffic:
+  mode:
+    auto: 自動
+    none: 無
+  host:
+    none: 尚無
+    throttling: 節流中
+    pass: 直通
+  text:
+    status: 處理 request admission、節流、排隊、延後重試與同站放行策略。
+    example: 當某站回傳 429 時，暫停同站後續請求一段時間，之後再由 proxy 逐步放行。
+    direction: 獨立於頁面修補與頁面重構，不與 response content rewrite 混在一起。
+  wait:
+    title: RelayGate Waiting
+    message: "RelayGate 正在排隊並重試：{url}"
+
+patch:
+  text:
+    model: 目前已開始支援 vars 與 json 兩段，並以 pipe 做最小處理。
+    example: YouTube 已改由 patch YAML 驅動，不再只靠 MITM 硬寫函式。
+
+render:
+  text:
+    duty: 根據 URL 命中規則，抽取資料並套入模板，輸出新的頁面內容。
+    rule: 不擴成萬能 rewrite engine，與修補分責。
+
+rewrite_page:
+  title: Rewrite 規則
+  reload: 重讀 Rewrite 規則
+  reload_note: 外部編輯 Rewrite 檔案後可手動重讀；RelayGate 不監控檔案變更，重新載入成功後才會替換現行 runtime。

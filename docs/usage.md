@@ -1,71 +1,66 @@
-# Usage
+# Usage Guide
 
-Use this file after RelayGate is built.
+## Start RelayGate
 
-## Default Ports
+Run:
 
-- Proxy: `0.0.0.0:8787`
-- Web: `0.0.0.0:8788`
+```bat
+relaygate.exe
+```
 
-## Start
+By default, RelayGate listens on:
 
-1. Start RelayGate.
-2. Set your browser or app to use RelayGate as a proxy.
-3. Use `localhost:8787` or your machine IP with port `8787`.
+```text
+127.0.0.1:8787
+```
 
-## Open The Web Page
+Open the local control panel:
 
-Use one of these:
+```text
+http://127.0.0.1:8787/
+```
 
-- `http://127.0.0.1:8788/`
-- `http://localhost:8788/`
-- `http://<your-ip>:8788/`
+Do not browse to `0.0.0.0`. It is a listen address, not a browser address.
 
-If your browser is already using RelayGate as a proxy, these may also work:
+## Set Browser Proxy
 
-- `http://127.0.0.1:8787/`
-- `http://localhost:8787/`
-- `http://rg.local/`
-- `http://rg.localhost/`
+Use browser-level proxy setup when possible.
 
-Notes:
+Recommended test tool:
 
-- `0.0.0.0` is a listen address.
-- In a browser, do not open `0.0.0.0`.
+- Proxy SwitchyOmega 3 (ZeroOmega)
 
-## HTTPS And Local CA
+Proxy profile:
 
-If you use HTTPS MITM, RelayGate may create a local CA (Certificate Authority) in:
+- Protocol: HTTP
+- Host: `127.0.0.1`
+- Port: `8787`
 
-- `data/mitm/`
+See [Browser Proxy Setup](./browser-proxy-setup.md).
 
-This local CA lets RelayGate create site certificates for HTTPS traffic.
+## HTTPS MITM
 
-Important:
+Some HTTPS features need HTTPS MITM and a trusted local CA.
 
-1. Your device or browser must trust this local CA.
-2. RelayGate uses this CA to sign site certificates for the client side.
-3. The client side will not see the target site's real certificate directly.
+RelayGate can generate the local CA and install it into the Windows Current User
+Root certificate store.
 
-## Upstream TLS Check
+See [HTTPS MITM And CA](./https-mitm-and-ca.md).
 
-RelayGate still checks the target site's certificate by default.
+## Control Panel
 
-This means:
+The local control panel can show and manage:
 
-- Trusting the local RelayGate CA does not disable the upstream TLS check.
-- If the target site's certificate is invalid, RelayGate should treat it as an error.
-- RelayGate may return its own error page to say the upstream certificate is invalid.
+- runtime status
+- adblock settings
+- DNS profiles and routes
+- upstream proxy profiles and routes
+- resource replacement rules
+- User Script scan status
+- traffic state
+- gateway mounts
+- CA status
+- protocol preferences
 
-## Invalid Upstream Certificate Whitelist
-
-You can allow some hosts to bypass the upstream TLS check:
-
-- `proxy.mitm.tolerate_invalid_upstream_cert_hosts`
-
-Use this only for hosts that you trust.
-
-## Notes
-
-- If some data files are missing, RelayGate may still start.
-- In that case, some features may not work.
+Some settings may need a restart or reconnect before all traffic paths use the
+new value.

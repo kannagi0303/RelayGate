@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use reqwest::{header::HeaderMap as ReqwestHeaderMap, Client, Proxy, StatusCode};
+use reqwest::{
+    header::{HeaderMap as ReqwestHeaderMap, ACCEPT_ENCODING},
+    Client, Proxy, StatusCode,
+};
 use tracing::info;
 
 use crate::{
@@ -8,7 +11,7 @@ use crate::{
 };
 
 /// Response wrapper for gateway mode.
-/// When a user visits a local mount path such as `/sukebei/...`,
+/// When a user visits a local mount path such as `/site/...`,
 /// RelayGate fetches the remote site and builds the final browser response here.
 #[derive(Debug, Clone)]
 pub struct GatewayResponse {
@@ -49,6 +52,11 @@ pub async fn fetch_mount(
         }
     }
 
+    if !mount.passthrough_mode {
+        // Gateway rewrite expects plain response bytes, not compressed payloads.
+        outbound = outbound.header(ACCEPT_ENCODING, "identity");
+    }
+
     if !request_body.is_empty() {
         outbound = outbound.body(request_body.to_vec());
     }
@@ -66,7 +74,7 @@ pub async fn fetch_mount(
         if let Some(minimal_mode) = &mount.minimal_page_mode {
             rewrite::rewrite_minimal_page(&body, mount, minimal_mode, &target_url)?
         } else if mount.rewrite_links {
-            rewrite::rewrite_html_links(&body, mount)?
+            rewrite::rewrite_html_links(&body, content_type.as_deref(), mount)?
         } else {
             body
         }
@@ -92,7 +100,7 @@ pub async fn fetch_mount(
     })
 }
 
-fn build_target_url(mount: &MountSiteConfig, request_path: &str) -> Result<String> {
+pub fn build_target_url(mount: &MountSiteConfig, request_path: &str) -> Result<String> {
     let mount_prefix = mount.mount_path.trim_end_matches('/');
     let target_base = mount.target_base_url.trim_end_matches('/');
     let suffix = request_path
@@ -123,7 +131,7 @@ fn build_client(mount: &MountSiteConfig, upstreams: &[UpstreamConfig]) -> Result
     Ok(builder.build()?)
 }
 
-fn should_forward_request_header(name: &str) -> bool {
+pub fn should_forward_request_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "user-agent"
@@ -137,7 +145,7 @@ fn should_forward_request_header(name: &str) -> bool {
     )
 }
 
-fn rewrite_response_headers(
+pub fn rewrite_response_headers(
     headers: &ReqwestHeaderMap,
     mount: &MountSiteConfig,
     body_len: usize,
@@ -244,7 +252,7 @@ fn is_probably_text_content(content_type: Option<&str>) -> bool {
         || content_type.contains("x-www-form-urlencoded")
 }
 
-fn rewrite_request_header_value(
+pub fn rewrite_request_header_value(
     name: &str,
     value: &str,
     origin: &str,

@@ -1,51 +1,46 @@
-# Build
+# Build Guide
 
-Use this file if you want to build RelayGate from source.
+RelayGate is Windows-first.
 
-## Need
+## Requirements
 
-- Windows
-- Rust
+- Rust toolchain
+- pnpm, if you want to build the embedded web UI
 
-## Steps
+## Build For Development
 
-1. Open PowerShell in the project folder.
-2. Run:
-
-```powershell
-cargo run
-```
-
-3. Wait for RelayGate to build and start.
-
-## Release Build
-
-1. Open PowerShell in the project folder.
-2. Run:
-
-```powershell
+```bat
 cargo build --release
 ```
 
-## Default Ports
+This builds the default development binary.
 
-- Proxy: `0.0.0.0:8787`
-- Web: `0.0.0.0:8788`
+## Build The Portable Binary
 
-Notes:
+To build a portable executable, use the portable binary target:
 
-- `0.0.0.0` is a listen address.
-- In a browser, use `localhost` or your machine IP.
+```bat
+cargo build --release --bin relaygate-portable
+```
 
-## First Run
+The portable binary uses the executable directory as its runtime base directory.
+This target is useful when you want RelayGate to use the executable directory as its runtime directory.
 
-RelayGate can create these folders when needed:
+## Frontend Notes
 
-- `data/logs/`
-- `data/mitm/`
-- `data/traffic/`
+The control panel frontend is built from `frontend/` and embedded into the Rust
+binary by the build script.
 
-Notes:
+Install frontend dependencies before a full embedded UI build:
 
-- The app can still start if some `data/` folders are missing.
-- In that case, some features may be limited.
+```bat
+cd frontend
+pnpm install
+pnpm build
+```
+
+Then build RelayGate again from the project root.
+
+If the frontend build is intentionally skipped, RelayGate can still provide a
+fallback embedded page, but the full control panel experience needs the frontend
+build.

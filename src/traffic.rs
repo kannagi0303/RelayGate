@@ -57,7 +57,7 @@ struct HostTrafficRuntime {
     last_429_at: Option<SystemTime>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct TrafficSitesFile {
     #[serde(default)]
     hosts: Vec<String>,
@@ -134,7 +134,6 @@ impl TrafficState {
             sites_path: traffic_sites_path()?,
             state_path: traffic_state_path()?,
         };
-        ensure_default_files(&storage)?;
 
         let sites = load_sites_file(&storage.sites_path)?;
         let learned = load_state_file(&storage.state_path)?;
@@ -618,6 +617,11 @@ impl TrafficState {
             .map_err(|_| anyhow::anyhow!("traffic persisted state lock poisoned"))?
             .clone();
         let yaml = serde_yaml::to_string(&state)?;
+        if let Some(parent) = self.storage.state_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create traffic state dir: {}", parent.display())
+            })?;
+        }
         fs::write(&self.storage.state_path, yaml).with_context(|| {
             format!(
                 "failed to write traffic state file: {}",
@@ -664,48 +668,34 @@ pub fn parse_retry_after_secs(headers: &[(String, String)]) -> Option<u64> {
         .and_then(|(_, value)| value.trim().parse::<u64>().ok())
 }
 
-pub fn reload_page_response(delay: Duration, target_url: &str) -> Vec<u8> {
+pub fn reload_page_body(delay: Duration, target_url: &str) -> Vec<u8> {
     let delay_ms = delay.as_millis().max(500);
     let title = html_escape(&lang::text("traffic.wait.title"));
     let message = html_escape(&lang::format(
         "traffic.wait.message",
         &[("url", target_url.to_string())],
     ));
-    let body = format!(
+    format!(
         "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"{refresh}\"><title>{title}</title></head><body><script>setTimeout(function(){{location.reload();}}, {delay_ms});</script><p>{message}</p></body></html>",
         refresh = (delay_ms / 1000).max(1),
-    );
-    format!(
-        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
     )
     .into_bytes()
 }
 
-fn ensure_default_files(storage: &TrafficStorage) -> Result<()> {
-    if let Some(parent) = storage.sites_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    if !storage.sites_path.exists() {
-        let sites = TrafficSitesFile {
-            hosts: vec!["sukebei.nyaa.si".to_string()],
-        };
-        fs::write(&storage.sites_path, serde_yaml::to_string(&sites)?)?;
-    }
-
-    if !storage.state_path.exists() {
-        fs::write(
-            &storage.state_path,
-            serde_yaml::to_string(&TrafficStateFile::default())?,
-        )?;
-    }
-
-    Ok(())
+pub fn reload_page_response(delay: Duration, target_url: &str) -> Vec<u8> {
+    let body = reload_page_body(delay, target_url);
+    format!(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        String::from_utf8_lossy(&body),
+    )
+    .into_bytes()
 }
 
 fn load_sites_file(path: &Path) -> Result<TrafficSitesFile> {
+    if !path.exists() {
+        return Ok(TrafficSitesFile::default());
+    }
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read traffic sites file: {}", path.display()))?;
     let mut sites = serde_yaml::from_str::<TrafficSitesFile>(&content)
@@ -718,6 +708,9 @@ fn load_sites_file(path: &Path) -> Result<TrafficSitesFile> {
 }
 
 fn load_state_file(path: &Path) -> Result<TrafficStateFile> {
+    if !path.exists() {
+        return Ok(TrafficStateFile::default());
+    }
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read traffic state file: {}", path.display()))?;
     Ok(serde_yaml::from_str::<TrafficStateFile>(&content)

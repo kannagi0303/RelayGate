@@ -61,7 +61,7 @@ pub fn diagnostic_timestamp() -> String {
 }
 
 fn proxy_diagnostics_path() -> Result<PathBuf> {
-    Ok(log_base_dir()?.join("proxy-errors.log"))
+    Ok(log_base_dir()?.join("proxy-diagnostics.log"))
 }
 
 fn proxy_perf_diagnostics_path() -> Result<PathBuf> {

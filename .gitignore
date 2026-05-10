@@ -1,6 +1,10 @@
 # Rust build output.
 /target/
 
+# Frontend build output and local dependencies.
+/frontend/node_modules/
+/frontend/dist/
+
 # Local runtime data and sensitive files.
 /logs/
 /mitm/
@@ -10,10 +14,20 @@
 /data/adblock/
 /data/rewrite/
 /data/traffic/
+/data/resource_replace/
+/data/user_script/
+/data/upstreams.yaml
+/data/dns.yaml
+/data/dns/
 /data/patch/*
 !/data/patch/youtube.yaml
 
+# Local release artifacts.
+/*.zip
+/assets/*.zip
+
 # Local development notes.
+/AGENTS.md
 /notes/
 
 # Common editor files.
@@ -21,3 +35,14 @@
 .vscode/
 *.tmp
 *.log
+
+# Local build stamps.
+/frontend/.relaygate-build-stamp
+
+# Local secrets and certificate material.
+*.pem
+*.key
+*.pfx
+*.p12
+.env
+.env.*
