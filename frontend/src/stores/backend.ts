@@ -9,6 +9,40 @@ export type BackendEnvelope =
   | { event: string; payload: unknown };
 
 let feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+let initialSnapshotFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+let snapshotRequestId = 0;
+
+function clearInitialSnapshotFallback() {
+  if (initialSnapshotFallbackTimer) {
+    clearTimeout(initialSnapshotFallbackTimer);
+    initialSnapshotFallbackTimer = null;
+  }
+}
+
+function mergeMitmStatus(existing: unknown, incoming: unknown): unknown {
+  if (incoming === null || typeof incoming !== "object") return incoming;
+  if (existing === null || typeof existing !== "object") return incoming;
+
+  const existingMitm = existing as Record<string, unknown>;
+  const incomingMitm = incoming as Record<string, unknown>;
+  const merged = { ...existingMitm, ...incomingMitm };
+
+  const incomingHasOnlyFastTrust =
+    incomingMitm.windows_user_root_trusted == null &&
+    Array.isArray(incomingMitm.windows_relaygate_cas) &&
+    incomingMitm.windows_relaygate_cas.length === 0;
+
+  if (incomingHasOnlyFastTrust) {
+    if (existingMitm.windows_user_root_trusted != null) {
+      merged.windows_user_root_trusted = existingMitm.windows_user_root_trusted;
+    }
+    if (Array.isArray(existingMitm.windows_relaygate_cas)) {
+      merged.windows_relaygate_cas = existingMitm.windows_relaygate_cas;
+    }
+  }
+
+  return merged;
+}
 
 export const useBackendStore = defineStore("backend", {
   state: () => ({
@@ -24,6 +58,7 @@ export const useBackendStore = defineStore("backend", {
     status: (state) => state.backendPayload?.status ?? null,
     settings: (state) => state.backendPayload?.settings ?? null,
     traffic: (state) => state.backendPayload?.traffic ?? null,
+    connectionInfo: (state) => state.backendPayload?.connection_info ?? null,
     patch: (state) => state.backendPayload?.patch ?? null,
     render: (state) => state.backendPayload?.render ?? null,
     adblock: (state) => state.backendPayload?.adblock ?? null,
@@ -39,6 +74,7 @@ export const useBackendStore = defineStore("backend", {
       connectBackendEvents({
         onOpen: () => {
           this.connected = true;
+          this.scheduleInitialSnapshotFallback();
         },
         onClose: () => {
           this.connected = false;
@@ -49,8 +85,13 @@ export const useBackendStore = defineStore("backend", {
             this.applyI18n(data as I18nPayload);
             return;
           }
-          if (eventName === "backend_full" || typeof data === "object") {
-            this.backendPayload = data as any;
+          if (eventName === "backend_full") {
+            clearInitialSnapshotFallback();
+            this.applyBackendPayload(data);
+            return;
+          }
+          if (data !== null && typeof data === "object") {
+            this.applyBackendPayload(data);
           }
         },
       });
@@ -58,6 +99,87 @@ export const useBackendStore = defineStore("backend", {
     applyI18n(payload: I18nPayload) {
       this.i18nLocale = payload.locale;
       applyI18nPayload(payload);
+    },
+    applyBackendPayload(data: unknown) {
+      if (data === null || typeof data !== "object") return;
+      const incoming = { ...(data as Record<string, unknown>) };
+      const processPayload = incoming.process;
+      delete incoming.process;
+
+      if (
+        incoming.settings !== null &&
+        typeof incoming.settings === "object" &&
+        this.backendPayload?.settings !== null &&
+        typeof this.backendPayload?.settings === "object"
+      ) {
+        const existingSettings = this.backendPayload.settings as Record<string, unknown>;
+        const incomingSettings = incoming.settings as Record<string, unknown>;
+        incoming.settings = {
+          ...existingSettings,
+          ...incomingSettings,
+          mitm:
+            "mitm" in incomingSettings
+              ? mergeMitmStatus(existingSettings.mitm, incomingSettings.mitm)
+              : existingSettings.mitm,
+        };
+      }
+
+      let merged = this.backendPayload
+        ? { ...this.backendPayload, ...incoming }
+        : incoming;
+
+      if (
+        processPayload !== undefined &&
+        merged.status !== null &&
+        typeof merged.status === "object"
+      ) {
+        merged = {
+          ...merged,
+          status: {
+            ...(merged.status as Record<string, unknown>),
+            process: processPayload,
+          },
+        };
+      }
+
+      this.backendPayload = merged;
+    },
+    scheduleInitialSnapshotFallback() {
+      clearInitialSnapshotFallback();
+      if (this.backendPayload) return;
+      initialSnapshotFallbackTimer = setTimeout(() => {
+        initialSnapshotFallbackTimer = null;
+        if (!this.backendPayload) {
+          void this.refreshSnapshot();
+        }
+      }, 350);
+    },
+    async refreshSnapshot() {
+      const requestId = ++snapshotRequestId;
+      try {
+        const response = await fetch("/backend/snapshot", {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (requestId !== snapshotRequestId) return;
+        this.applyBackendPayload(payload);
+      } catch {
+        // SSE remains the primary live channel; snapshot refresh is best-effort.
+      }
+    },
+    async refreshConnectionInfo() {
+      try {
+        const response = await fetch("/backend/connection-info", {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+        this.applyBackendPayload(await response.json());
+      } catch {
+        // Connection info is observational; stale UI is safer than retry pressure.
+      }
     },
     clearFeedback() {
       if (feedbackTimer) {

@@ -1,12 +1,8 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
 };
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 use anyhow::{bail, Context, Result};
 use rcgen::{
@@ -21,9 +17,6 @@ use sha1::{Digest, Sha1};
 use tokio_rustls::TlsAcceptor;
 
 use crate::path_mode::{app_path_mode, AppPathMode};
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone)]
 pub(crate) struct MitmPreparation {
@@ -260,18 +253,22 @@ pub(crate) fn normalize_authority(authority: &str) -> Result<(String, u16)> {
 }
 
 pub fn mitm_storage_dir() -> Result<PathBuf> {
-    let preferred = match app_path_mode() {
+    // MITM CA material is RelayGate-owned persistent state.
+    // Keep the storage path fixed under data/state/mitm and do not recreate the
+    // deprecated pre-layout MITM directory when a fresh CA is generated.
+    let storage_dir = match app_path_mode() {
         AppPathMode::Workspace => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("data")
+            .join("state")
             .join("mitm"),
         AppPathMode::Portable => executable_base_dir()
             .context("failed to resolve executable directory for MITM storage")?
             .join("data")
+            .join("state")
             .join("mitm"),
     };
 
-    migrate_legacy_mitm_storage_if_needed(&preferred)?;
-    Ok(preferred)
+    Ok(storage_dir)
 }
 
 pub fn create_and_trust_local_ca() -> Result<()> {
@@ -304,58 +301,6 @@ fn executable_base_dir() -> Result<PathBuf> {
     Ok(parent.to_path_buf())
 }
 
-fn migrate_legacy_mitm_storage_if_needed(preferred_dir: &Path) -> Result<()> {
-    if preferred_dir.exists() {
-        return Ok(());
-    }
-
-    let Some(legacy_dir) = legacy_mitm_storage_dir() else {
-        return Ok(());
-    };
-
-    if !legacy_dir.exists() {
-        return Ok(());
-    }
-
-    let legacy_cert = legacy_dir.join("relaygate-ca-cert.pem");
-    let legacy_key = legacy_dir.join("relaygate-ca-key.pem");
-    if !legacy_cert.exists() && !legacy_key.exists() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(preferred_dir).with_context(|| {
-        format!(
-            "failed to create preferred MITM storage directory during migration: {}",
-            preferred_dir.display()
-        )
-    })?;
-
-    let preferred_cert = preferred_dir.join("relaygate-ca-cert.pem");
-    let preferred_key = preferred_dir.join("relaygate-ca-key.pem");
-
-    if legacy_cert.exists() && !preferred_cert.exists() {
-        fs::copy(&legacy_cert, &preferred_cert).with_context(|| {
-            format!(
-                "failed to migrate legacy CA certificate from {} to {}",
-                legacy_cert.display(),
-                preferred_cert.display()
-            )
-        })?;
-    }
-
-    if legacy_key.exists() && !preferred_key.exists() {
-        fs::copy(&legacy_key, &preferred_key).with_context(|| {
-            format!(
-                "failed to migrate legacy CA private key from {} to {}",
-                legacy_key.display(),
-                preferred_key.display()
-            )
-        })?;
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod authority_tests {
     use super::normalize_authority;
@@ -373,23 +318,6 @@ mod authority_tests {
 
         assert_eq!(parsed, ("::1".to_string(), 443));
     }
-}
-
-fn legacy_mitm_storage_dir() -> Option<PathBuf> {
-    let workspace_legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("mitm");
-    if workspace_legacy.exists() {
-        return Some(workspace_legacy);
-    }
-
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        return Some(PathBuf::from(local_app_data).join("RelayGate").join("mitm"));
-    }
-
-    if let Some(app_data) = env::var_os("APPDATA") {
-        return Some(PathBuf::from(app_data).join("RelayGate").join("mitm"));
-    }
-
-    None
 }
 
 fn generate_and_store_ca(cert_path: &Path, key_path: &Path) -> Result<()> {
@@ -421,45 +349,11 @@ fn generate_and_store_ca(cert_path: &Path, key_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn hidden_command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-}
-
 #[cfg(windows)]
 fn ensure_ca_installed_in_windows_user_root(ca: &MitmCaMaterial) -> Result<()> {
     let thumbprint = sha1_thumbprint_from_pem(&ca.cert_pem)?;
-    let check_script = format!(
-        r#"$thumb = '{thumbprint}'
-$store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
-)
-try {{
-  $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-  $existing = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-  if ($existing.Count -gt 0) {{ Write-Output 'present' }} else {{ Write-Output 'missing' }}
-}} finally {{
-  $store.Close()
-}}"#
-    );
 
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &check_script])
-        .output()
-        .context("failed to execute PowerShell for CA trust check")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to check RelayGate CA in Windows user Root store: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if stdout.trim() == "present" {
+    if windows_root_contains_thumbprint(&thumbprint)? {
         tracing::debug!(
             thumbprint = thumbprint,
             "RelayGate CA already present in Windows CurrentUser Root store"
@@ -467,45 +361,39 @@ try {{
         return Ok(());
     }
 
-    let install_output = hidden_command("certutil")
-        .args([
-            "-user",
-            "-addstore",
-            "Root",
-            &ca.cert_path.to_string_lossy(),
-        ])
-        .output()
-        .context("failed to execute certutil for CA trust installation")?;
+    install_ca_in_windows_user_root_native(ca, &thumbprint)?;
+    tracing::debug!(
+        thumbprint = thumbprint,
+        "RelayGate CA installed into Windows CurrentUser Root store via native API"
+    );
 
-    if !install_output.status.success() {
-        let stderr = String::from_utf8_lossy(&install_output.stderr);
-        let stdout = String::from_utf8_lossy(&install_output.stdout);
+    if !windows_root_contains_thumbprint(&thumbprint)? {
+        bail!("RelayGate CA installation reported success, but the certificate is still missing from Windows CurrentUser Root store");
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn install_ca_in_windows_user_root_native(ca: &MitmCaMaterial, thumbprint: &str) -> Result<()> {
+    let installed_thumbprint = crate::web::windows_cert_store::add_certificate_bytes_to_root(
+        crate::web::windows_cert_store::RootStoreScope::CurrentUser,
+        &ca.cert_pem,
+    )?;
+
+    if installed_thumbprint != thumbprint {
         bail!(
-            "failed to install RelayGate CA into Windows user Root store via certutil\nstdout: {stdout}\nstderr: {stderr}"
+            "installed CA thumbprint mismatch: expected {thumbprint}, got {installed_thumbprint}"
         );
     }
 
-    let verify_output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &check_script])
-        .output()
-        .context("failed to execute PowerShell for CA trust verification")?;
-
-    if !verify_output.status.success() {
-        let stderr = String::from_utf8_lossy(&verify_output.stderr);
-        bail!("failed to verify RelayGate CA after installation: {stderr}");
-    }
-
-    let verify_stdout = String::from_utf8_lossy(&verify_output.stdout);
-    if verify_stdout.trim() != "present" {
-        bail!("RelayGate CA installation reported success, but the certificate is still missing from CurrentUser\\Root");
-    }
-
-    tracing::debug!(
-        thumbprint = thumbprint,
-        "RelayGate CA installed into Windows CurrentUser Root store"
-    );
-
     Ok(())
+}
+
+#[cfg(windows)]
+fn windows_root_contains_thumbprint(thumbprint: &str) -> Result<bool> {
+    let locations = crate::web::windows_cert_store::root_locations_for_thumbprint(thumbprint)?;
+    Ok(!locations.is_empty())
 }
 
 #[cfg(windows)]

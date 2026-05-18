@@ -996,6 +996,14 @@ code {
   color: var(--rg-accent-strong);
 }
 
+.resource-card small {
+  gap: calc(6 / 16 * 1rem) calc(10 / 16 * 1rem);
+}
+
+.resource-card small span {
+  white-space: nowrap;
+}
+
 .dashboard-grid {
   display: grid;
   gap: calc(16 / 16 * 1rem);
@@ -1016,7 +1024,11 @@ code {
 }
 
 .dns-summary-list {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dns-active-row {
+  background: rgba(101, 163, 255, 0.08);
 }
 
 .route-summary-list {
@@ -1104,4 +1116,9 @@ code {
   .summary-list {
     grid-template-columns: 1fr;
   }
+}
+
+.status-cell,
+.status-cell .status-pill {
+  white-space: nowrap;
 }

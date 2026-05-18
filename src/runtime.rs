@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     process,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -39,6 +40,14 @@ pub struct ProcessMetrics {
     pub cpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
     pub sample_interval_secs: u64,
+    pub window_secs: u64,
+    pub window_sample_count: usize,
+    pub avg_cpu_percent_15m: Option<f64>,
+    pub peak_cpu_percent_15m: Option<f64>,
+    pub avg_memory_bytes_15m: Option<u64>,
+    pub peak_memory_bytes_15m: Option<u64>,
+    pub session_peak_cpu_percent: Option<f64>,
+    pub session_peak_memory_bytes: Option<u64>,
 }
 
 struct RuntimeInner {
@@ -48,27 +57,67 @@ struct RuntimeInner {
     shutdown_requested: AtomicBool,
     process_metrics: Mutex<ProcessMetricsSampler>,
     backend_change_tx: watch::Sender<BackendSignal>,
+    traffic_backend_notify: Mutex<ThrottledBackendNotifyState>,
+}
+
+#[derive(Default)]
+struct ThrottledBackendNotifyState {
+    last_sent_at: Option<Instant>,
+    pending: bool,
+}
+
+struct ProcessMetricsSample {
+    sampled_at: Instant,
+    cpu_percent: Option<f64>,
+    memory_bytes: Option<u64>,
+}
+
+struct ProcessMetricsWindowSummary {
+    sample_count: usize,
+    avg_cpu_percent: Option<f64>,
+    peak_cpu_percent: Option<f64>,
+    avg_memory_bytes: Option<u64>,
+    peak_memory_bytes: Option<u64>,
 }
 
 struct ProcessMetricsSampler {
     cached: ProcessMetrics,
+    history: VecDeque<ProcessMetricsSample>,
+    session_peak_cpu_percent: Option<f64>,
+    session_peak_memory_bytes: Option<u64>,
     last_sample_at: Option<Instant>,
     last_process_time_100ns: Option<u64>,
 }
 
 impl ProcessMetricsSampler {
     const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+    const WINDOW: Duration = Duration::from_secs(15 * 60);
 
     fn new() -> Self {
         Self {
-            cached: ProcessMetrics {
-                pid: process::id(),
-                cpu_percent: None,
-                memory_bytes: process_memory_bytes(),
-                sample_interval_secs: Self::SAMPLE_INTERVAL.as_secs(),
-            },
+            cached: Self::empty_metrics(),
+            history: VecDeque::new(),
+            session_peak_cpu_percent: None,
+            session_peak_memory_bytes: None,
             last_sample_at: None,
             last_process_time_100ns: process_time_100ns(),
+        }
+    }
+
+    fn empty_metrics() -> ProcessMetrics {
+        ProcessMetrics {
+            pid: process::id(),
+            cpu_percent: None,
+            memory_bytes: process_memory_bytes(),
+            sample_interval_secs: Self::SAMPLE_INTERVAL.as_secs(),
+            window_secs: Self::WINDOW.as_secs(),
+            window_sample_count: 0,
+            avg_cpu_percent_15m: None,
+            peak_cpu_percent_15m: None,
+            avg_memory_bytes_15m: None,
+            peak_memory_bytes_15m: None,
+            session_peak_cpu_percent: None,
+            session_peak_memory_bytes: None,
         }
     }
 
@@ -102,15 +151,101 @@ impl ProcessMetricsSampler {
                 },
             );
 
+        self.record_sample(now, cpu_percent, memory_bytes);
+        let summary = self.window_summary(now);
         self.cached = ProcessMetrics {
             pid: process::id(),
             cpu_percent,
             memory_bytes,
             sample_interval_secs: Self::SAMPLE_INTERVAL.as_secs(),
+            window_secs: Self::WINDOW.as_secs(),
+            window_sample_count: summary.sample_count,
+            avg_cpu_percent_15m: summary.avg_cpu_percent,
+            peak_cpu_percent_15m: summary.peak_cpu_percent,
+            avg_memory_bytes_15m: summary.avg_memory_bytes,
+            peak_memory_bytes_15m: summary.peak_memory_bytes,
+            session_peak_cpu_percent: self.session_peak_cpu_percent,
+            session_peak_memory_bytes: self.session_peak_memory_bytes,
         };
         self.last_sample_at = Some(now);
         self.last_process_time_100ns = process_time;
         self.cached.clone()
+    }
+
+    fn record_sample(
+        &mut self,
+        sampled_at: Instant,
+        cpu_percent: Option<f64>,
+        memory_bytes: Option<u64>,
+    ) {
+        if let Some(cpu) = cpu_percent.filter(|value| value.is_finite()) {
+            self.session_peak_cpu_percent = Some(
+                self.session_peak_cpu_percent
+                    .map(|peak| peak.max(cpu))
+                    .unwrap_or(cpu),
+            );
+        }
+        if let Some(memory) = memory_bytes {
+            self.session_peak_memory_bytes = Some(
+                self.session_peak_memory_bytes
+                    .map(|peak| peak.max(memory))
+                    .unwrap_or(memory),
+            );
+        }
+
+        self.history.push_back(ProcessMetricsSample {
+            sampled_at,
+            cpu_percent,
+            memory_bytes,
+        });
+        self.prune_history(sampled_at);
+    }
+
+    fn prune_history(&mut self, now: Instant) {
+        while self
+            .history
+            .front()
+            .is_some_and(|sample| now.duration_since(sample.sampled_at) > Self::WINDOW)
+        {
+            self.history.pop_front();
+        }
+    }
+
+    fn window_summary(&mut self, now: Instant) -> ProcessMetricsWindowSummary {
+        self.prune_history(now);
+
+        let mut cpu_sum = 0.0;
+        let mut cpu_count = 0usize;
+        let mut peak_cpu_percent: Option<f64> = None;
+        let mut memory_sum = 0u128;
+        let mut memory_count = 0usize;
+        let mut peak_memory_bytes: Option<u64> = None;
+
+        for sample in &self.history {
+            if let Some(cpu) = sample.cpu_percent.filter(|value| value.is_finite()) {
+                cpu_sum += cpu;
+                cpu_count += 1;
+                peak_cpu_percent = Some(peak_cpu_percent.map(|peak| peak.max(cpu)).unwrap_or(cpu));
+            }
+            if let Some(memory) = sample.memory_bytes {
+                memory_sum += memory as u128;
+                memory_count += 1;
+                peak_memory_bytes = Some(
+                    peak_memory_bytes
+                        .map(|peak| peak.max(memory))
+                        .unwrap_or(memory),
+                );
+            }
+        }
+
+        ProcessMetricsWindowSummary {
+            sample_count: self.history.len(),
+            avg_cpu_percent: (cpu_count > 0).then_some(cpu_sum / cpu_count as f64),
+            peak_cpu_percent,
+            avg_memory_bytes: (memory_count > 0)
+                .then(|| (memory_sum / memory_count as u128) as u64),
+            peak_memory_bytes,
+        }
     }
 }
 
@@ -128,6 +263,7 @@ impl AppRuntime {
                 shutdown_requested: AtomicBool::new(false),
                 process_metrics: Mutex::new(ProcessMetricsSampler::new()),
                 backend_change_tx,
+                traffic_backend_notify: Mutex::new(ThrottledBackendNotifyState::default()),
             }),
         }
     }
@@ -162,12 +298,7 @@ impl AppRuntime {
             .process_metrics
             .lock()
             .map(|mut sampler| sampler.sample())
-            .unwrap_or_else(|_| ProcessMetrics {
-                pid: process::id(),
-                cpu_percent: None,
-                memory_bytes: process_memory_bytes(),
-                sample_interval_secs: ProcessMetricsSampler::SAMPLE_INTERVAL.as_secs(),
-            })
+            .unwrap_or_else(|_| ProcessMetricsSampler::empty_metrics())
     }
 
     pub fn backend_signal(&self) -> BackendSignal {
@@ -176,6 +307,10 @@ impl AppRuntime {
 
     pub fn subscribe_backend_changes(&self) -> watch::Receiver<BackendSignal> {
         self.inner.backend_change_tx.subscribe()
+    }
+
+    pub fn has_backend_subscribers(&self) -> bool {
+        self.inner.backend_change_tx.receiver_count() > 0
     }
 
     pub fn notify_status_changed(&self) {
@@ -191,7 +326,78 @@ impl AppRuntime {
     }
 
     pub fn notify_traffic_changed(&self) {
-        self.notify_backend_changed(&["traffic"]);
+        const MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+        if !self.has_backend_subscribers() {
+            return;
+        }
+
+        let mut schedule_delay = None;
+        let send_now = {
+            let Ok(mut state) = self.inner.traffic_backend_notify.lock() else {
+                return self.notify_backend_changed(&["traffic"]);
+            };
+            let now = Instant::now();
+            match state.last_sent_at {
+                None => {
+                    state.last_sent_at = Some(now);
+                    state.pending = false;
+                    true
+                }
+                Some(last_sent_at) if now.duration_since(last_sent_at) >= MIN_INTERVAL => {
+                    state.last_sent_at = Some(now);
+                    state.pending = false;
+                    true
+                }
+                Some(last_sent_at) => {
+                    if !state.pending {
+                        state.pending = true;
+                        schedule_delay =
+                            Some(MIN_INTERVAL.saturating_sub(now.duration_since(last_sent_at)));
+                    }
+                    false
+                }
+            }
+        };
+
+        if send_now {
+            self.notify_backend_changed(&["traffic"]);
+        } else if let Some(delay) = schedule_delay {
+            self.schedule_pending_traffic_notify(delay);
+        }
+    }
+
+    fn schedule_pending_traffic_notify(&self, delay: Duration) {
+        let runtime = self.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                tokio::time::sleep(delay).await;
+                runtime.flush_pending_traffic_notify();
+            });
+        } else {
+            self.flush_pending_traffic_notify();
+        }
+    }
+
+    fn flush_pending_traffic_notify(&self) {
+        let should_send = {
+            let Ok(mut state) = self.inner.traffic_backend_notify.lock() else {
+                return;
+            };
+            if !state.pending {
+                return;
+            }
+            state.pending = false;
+            if !self.has_backend_subscribers() {
+                return;
+            }
+            state.last_sent_at = Some(Instant::now());
+            true
+        };
+
+        if should_send {
+            self.notify_backend_changed(&["traffic"]);
+        }
     }
 
     pub fn notify_patch_changed(&self) {
@@ -215,6 +421,10 @@ impl AppRuntime {
     }
 
     pub fn notify_backend_changed(&self, changed: &[&str]) {
+        if !self.has_backend_subscribers() {
+            return;
+        }
+
         let current = self.inner.backend_change_tx.borrow().clone();
         let next = BackendSignal {
             version: current.version.wrapping_add(1),

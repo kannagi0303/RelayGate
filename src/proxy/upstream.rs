@@ -36,6 +36,18 @@ pub struct UpstreamRouteEntry {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct UpstreamStatusSummary {
+    pub enabled_upstreams: Vec<UpstreamStatusItem>,
+    pub enabled_route_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamStatusItem {
+    pub id: String,
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Default)]
 struct UpstreamRouteMatcher {
     routes: Vec<UpstreamRouteEntry>,
     compiled_route_indexes: Vec<usize>,
@@ -84,6 +96,24 @@ impl UpstreamRegistry {
     pub fn route_len(&self) -> usize {
         self.routes.routes.len()
     }
+
+    pub fn status_summary(&self) -> UpstreamStatusSummary {
+        let mut enabled_upstreams = self
+            .entries
+            .values()
+            .filter(|entry| entry.enabled)
+            .map(|entry| UpstreamStatusItem {
+                id: entry.id.clone(),
+                address: entry.address.clone(),
+            })
+            .collect::<Vec<_>>();
+        enabled_upstreams.sort_by(|left, right| left.id.cmp(&right.id));
+
+        UpstreamStatusSummary {
+            enabled_upstreams,
+            enabled_route_count: self.routes.enabled_route_count(),
+        }
+    }
 }
 
 pub fn shared_from_config(
@@ -107,6 +137,10 @@ pub fn replace_shared_registry(
 }
 
 impl UpstreamRouteMatcher {
+    fn enabled_route_count(&self) -> usize {
+        self.routes.iter().filter(|route| route.enabled).count()
+    }
+
     fn from_config(items: &[UpstreamRouteConfig]) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         let mut routes = Vec::new();

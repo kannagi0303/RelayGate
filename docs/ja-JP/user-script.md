@@ -19,7 +19,7 @@ Runtime User Script files は local data です。
 Typical folder:
 
 ```text
-data/user_script/
+data/user/user_script/
 ```
 
 Scripts は使う前に review してください。

@@ -1,8 +1,12 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
-use serde::Serialize;
+use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+use super::matching::CompiledUserScriptMatcher;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UserScriptStatus {
     Supported,
@@ -43,7 +47,7 @@ impl RunAt {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserScriptMetadata {
     pub name: Option<String>,
     pub namespace: Option<String>,
@@ -52,6 +56,7 @@ pub struct UserScriptMetadata {
     pub matches: Vec<String>,
     pub includes: Vec<String>,
     pub excludes: Vec<String>,
+    pub exclude_matches: Vec<String>,
     pub run_at: Option<String>,
     pub grants: Vec<String>,
     pub inject_into: Option<String>,
@@ -68,6 +73,7 @@ pub struct UserScriptListItem {
     pub name: String,
     pub version: String,
     pub match_summary: String,
+    pub comment: String,
     pub enabled: bool,
     pub operable: bool,
     pub error: Option<String>,
@@ -78,7 +84,11 @@ pub(crate) struct UserScriptEntry {
     pub(crate) filename: String,
     pub(crate) path: PathBuf,
     pub(crate) metadata: Option<UserScriptMetadata>,
+    pub(crate) matcher: Option<CompiledUserScriptMatcher>,
+    pub(crate) source_cache: Arc<Mutex<Option<Arc<str>>>>,
     pub(crate) status: UserScriptStatus,
     pub(crate) error: Option<String>,
     pub(crate) enabled: bool,
+    pub(crate) size: u64,
+    pub(crate) modified_ms: u64,
 }

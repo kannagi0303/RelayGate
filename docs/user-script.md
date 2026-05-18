@@ -21,7 +21,7 @@ Runtime User Script files are local data.
 Typical folder:
 
 ```text
-data/user_script/
+data/user/user_script/
 ```
 
 Scripts should be reviewed before use.

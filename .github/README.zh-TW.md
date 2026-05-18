@@ -113,9 +113,10 @@ http://127.0.0.1:8787/
 
 RelayGate 可能會在執行目錄下建立 runtime data。
 
-這可能包含本地設定、logs、DNS cache、規則資料，以及 HTTPS MITM CA 檔案。
+使用者擁有的資料放在 `data/user/`。RelayGate 產生的狀態放在 `data/state/`。
+這可能包含本地設定、logs、DNS cache、規則資料、下載的 adblock 資料、learned connection health、diagnostics，以及 HTTPS MITM CA 檔案。
 
-請保持 runtime data 私有，尤其是 CA 相關檔案。
+請保持 runtime data 私有，尤其是 `data/state/mitm/` 底下的 CA 相關檔案。
 
 詳細說明請看：[隱私與資料](../docs/zh-TW/privacy-and-data.md)。
 

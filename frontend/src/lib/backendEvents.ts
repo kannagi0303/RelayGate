@@ -5,26 +5,37 @@ type BackendEventHandlers = {
 };
 
 let activeSource: EventSource | null = null;
+let activeHandlers: BackendEventHandlers | null = null;
 
 export function connectBackendEvents(handlers: BackendEventHandlers) {
-  if (activeSource) {
+  activeHandlers = handlers;
+
+  if (activeSource && activeSource.readyState !== EventSource.CLOSED) {
+    if (activeSource.readyState === EventSource.OPEN) {
+      activeHandlers.onOpen();
+    }
     return;
   }
 
   const source = new EventSource("/backend/events");
   activeSource = source;
 
-  source.onopen = () => handlers.onOpen();
-  source.onerror = () => handlers.onClose();
+  source.onopen = () => activeHandlers?.onOpen();
+  source.onerror = () => {
+    activeHandlers?.onClose();
+    if (source.readyState === EventSource.CLOSED && activeSource === source) {
+      activeSource = null;
+    }
+  };
   source.onmessage = (event) => {
-    handlers.onMessage(event.type || "message", parseEventData(event.data));
+    activeHandlers?.onMessage(event.type || "message", parseEventData(event.data));
   };
 
   source.addEventListener("backend_full", (event) => {
-    handlers.onMessage("backend_full", parseEventData(event.data));
+    activeHandlers?.onMessage("backend_full", parseEventData(event.data));
   });
   source.addEventListener("i18n_full", (event) => {
-    handlers.onMessage("i18n_full", parseEventData(event.data));
+    activeHandlers?.onMessage("i18n_full", parseEventData(event.data));
   });
 }
 

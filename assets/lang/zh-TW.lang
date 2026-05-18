@@ -5,6 +5,7 @@ meta:
 
 common:
   none: 無
+  loading: 載入中
   yes: 是
   no: 否
   enabled: 已啟用
@@ -56,6 +57,7 @@ nav:
   upstreams: 上游代理
   upstream_routes: 上游規則
   dns: DNS
+  connection_info: 連線資訊
   gateway: 網站掛載
   patch: 頁面修補
   render: 頁面重構
@@ -67,6 +69,9 @@ tray:
   open: 開啟控制台
   reload: 重新讀取
   exit: 結束
+  startup_ready:
+    title: RelayGate 已啟動
+    body: "控制台：{url}"
 
 settings:
   locale:
@@ -76,10 +81,10 @@ settings:
     note: 修改後需之後接熱套用或重啟。
   adblock:
     label: 追蹤器與廣告封鎖
-    note: 選擇關閉過濾、使用 Brave 標準行為，或使用會包含第一方請求的積極過濾。
+    note: 選擇關閉、基本或嚴謹。其他清單與資源維護由 RelayGate 自動處理。
   protocol:
     title: 協定優先順序
-    apply_note: 設定會寫入 relaygate.yaml。現有 proxy listener 仍使用啟動時設定；要確定套用協定變更，請重啟 RelayGate。
+    apply_note: 設定會寫入 data/user/settings.yaml。現有 proxy listener 仍使用啟動時設定；要確定套用協定變更，請重啟 RelayGate。
     upstream:
       label: 上游協定
       note: RelayGate 到來源站。自動模式相容性最好；guarded H3 改為明確選擇。
@@ -95,57 +100,26 @@ settings:
 
 adblock:
   mode:
-    off: 已停用
-    std: 標準
-    agg: 積極
+    off: 已關閉
+    std: 基本
+    agg: 嚴謹
   page:
-    sub: RelayGate 使用 Brave 相容的封鎖資料，並固定採用積極模式。清單與資源會在背景自動同步 Brave 預設來源；按下手動更新時，也會立刻下載並直接重載套用。
-    apply_note: 模式、偵錯與規則熱重載會直接套用到後續請求；已送出的頁面資源請重新整理頁面驗證。
+    sub: RelayGate 使用 Brave 相容的封鎖資料。清單與資源會在背景自動同步；此頁只控制廣告封鎖強度。
+    apply_note: 模式會直接套用到後續請求；已開啟的頁面請重新整理後再驗證。
   feature: 功能狀態
-  update:
-    label: 規則更新
-    note: 背景會自動同步 Brave 的預設 lists / resources。若想立即刷新，可直接按手動更新。
-    brave_note: 會依 Brave list catalog 載入預設清單，包含 hidden default 與 first-party protection 類清單；更新後會自動重新載入廣告封鎖 runtime。
-    auto: 自動
-    now: 手動更新
-  rules:
-    label: 規則來源
-    source: 清單來源
-    tags: 標籤
-    sub: 目前已載入 <strong id="adblock-rule-count">0</strong> 條規則，以及 <strong id="adblock-resource-count">0</strong> 份資源。RelayGate 目前固定使用積極過濾。
-    none: 目前沒有規則檔。請先下載預設規則，或手動放入 `.txt` / `.list` / `.filter` / `.filters` 檔案。
-  resources:
-    label: 資源檔
-    source: 來源
-    none: 目前沒有 resources.json。redirect / scriptlet 資源尚未載入。
-  troubleshooting:
-    title: 疑難排解
-    disable_fast_path: 停用 MITM 快速路徑
-    fast_path_note: 開啟後，MITM 回應會強制進入完整 body pipeline，用來檢查廣告封鎖 / Rewrite / 使用者腳本是否被 fast path 放過。可能降低效能，只建議除錯時使用。
-    debug_log: 記錄廣告封鎖判斷日誌
-    debug_log_note: 開啟後會把 request type、third-party 判定、命中規則與例外寫到 data/logs/adblock-debug.log。只建議短時間排查使用。
-  custom_rules:
-    title: 自訂規則
-    note: 編輯 {file}，再按「熱重載」即可套用。custom.txt 會最後載入，適合補 Brave 有擋、目前清單沒命中的規則。
-    open_folder: 開啟規則資料夾
-    reload: 熱重載廣告封鎖規則
   help:
     markdown: |
       ### 廣告封鎖
 
-      廣告封鎖使用 Brave 相容資料，並套用到後續請求。
+      廣告封鎖使用 Brave 相容資料，規則清單與資源由 RelayGate 在背景自動維護。
 
       ### 模式
 
-      可切換停用、標準或積極模式。模式變更會影響之後載入的頁面資源。
+      - 已關閉：不套用廣告封鎖。
+      - 基本：偏向低誤傷的日常過濾。
+      - 嚴謹：更積極的過濾，可能提高誤傷機率。
 
-      ### 規則與資源
-
-      規則清單與資源檔會顯示目前載入來源。自訂規則可放在規則資料夾中，修改後請熱重載。
-
-      ### 疑難排解
-
-      快速路徑與偵錯日誌只建議在排查問題時短時間使用。
+      模式變更會影響之後載入的頁面資源。
 
 status_page:
   title: 總覽
@@ -161,6 +135,10 @@ status_page:
   listen: 監聽位置
   https_auto: HTTPS 處理：自動
   resource_usage: 資源使用
+  resource_now: 目前
+  resource_avg_15m: 15 分鐘平均
+  resource_peak_15m: 15 分鐘峰值
+  resource_session_peak: 本次運行峰值
   baseline: Baseline
   runtime: Runtime
   loaded: 已載入
@@ -191,12 +169,12 @@ status_page:
 
 settings_page:
   title: 設定
-  sub: 這一版先偏單項單項編輯。儲存時會直接改寫 `relaygate.yaml`。
+  sub: 根層設定會寫入 `relaygate.yaml`；模組設定會寫入 `data/user/`。
   intro: 連線協定、CA 信任與 RelayGate 關閉操作集中在這裡。狀態頁只保留即時概要。
   basic: 基本設定
   language:
     title: 語言
-    body: 後台語言會寫入 relaygate.yaml，並立即熱切換。系統沒有設定時預設使用英文。
+    body: 後台語言會寫入 relaygate.yaml，並立即熱切換。沒有 root config 時預設使用英文。
     option:
       en-US: English
       zh-TW: 繁體中文
@@ -216,7 +194,7 @@ settings_page:
     title: CA 狀態與操作
     body: HTTPS 處理模式固定為「自動」。RelayGate 會依站點與規則選擇解密處理或 tunnel；這裡只管理 CA 是否已建立與是否受 Windows 信任。
     file: CA 檔案
-    windows_user_root: Windows 使用者根憑證
+    windows_user_root: Windows 使用者信任根狀態
     cert_path: 憑證路徑
     file_ready: 已建立
     file_partial: 不完整
@@ -225,8 +203,8 @@ settings_page:
     untrusted: 未信任
     unknown: 未知
     windows_list_title: Windows 中的 RelayGate CA
-    windows_list_note: 這裡列出 Windows 信任根中 subject 或 issuer 含 RelayGate 的憑證。逐筆移除可清理舊版本或其他資料夾留下的信任紀錄。
-    no_windows_ca: 目前沒有偵測到 Windows 信任根中的 RelayGate CA。
+    windows_list_note: 這裡列出目前使用者 Windows 信任根中 subject 或 issuer 含 RelayGate 的憑證。逐筆移除可清理舊版本或其他資料夾留下的信任紀錄。
+    no_windows_ca: 目前沒有偵測到使用者 Windows 信任根中的 RelayGate CA。
     current_ca: 目前 CA
     other_ca: 其他 RelayGate CA
     remove_this: 移除這張
@@ -280,9 +258,26 @@ traffic_page:
 
       這裡不處理 response content rewrite，與頁面修補、頁面重構分開。
 
+connection_info_page:
+  title: 連線資訊
+  sub: 顯示近期連線 host 的 DNS 來源、實際使用位址族與目前偏好。
+  recent_hosts: 近期 Host
+  max_items: 顯示上限
+  refresh: 自動更新
+  host_table: 近期連線觀察
+  dns: DNS
+  actual_family: 實際使用
+  preference: 位址族偏好
+  prefer_neutral: 中立
+  prefer_ipv4: 偏 IPv4
+  prefer_ipv6: 偏 IPv6
+  system_dns: 系統 DNS
+  none: 目前尚無連線觀察資料。
+  upstream_dns_unknown: 尚無 DNS cache
+
 upstreams_page:
   title: 上游代理
-  sub: 管理 host 路由會使用的上游 proxy profiles。此設定寫入 `data/upstreams.yaml`，並會立即套用到執行中的 proxy。
+  sub: 管理 host 路由會使用的上游 proxy profiles。此設定寫入 `data/user/settings.yaml`，並會立即套用到執行中的 proxy。
   add: 新增上游
   list: 上游清單
   address: 位址
@@ -335,7 +330,7 @@ upstream_routes_page:
 
 dns_page:
   title: DNS
-  sub: 管理 RelayGate 使用的 DNS profiles 與 host routes。此設定寫入 `data/dns.yaml`，並會套用到 direct HTTP、CONNECT、MITM 與網站掛載請求。
+  sub: 管理 RelayGate 使用的 DNS Server。此設定寫入 `data/user/settings.yaml`，並會套用到 direct HTTP、CONNECT、MITM 與網站掛載請求。
   apply_note: DNS 設定會熱套用到新請求，並清空正負快取，避免切換後仍吃到舊解析結果。
   cache: Cache
   add_profile: 新增 DNS Profile
@@ -349,85 +344,105 @@ dns_page:
   servers: Server
   servers_note: 以 `IP:Port` 表示 DNS server；Port 未指定時通常使用 53。
   fallback: Fallback Profiles
-  fallback_note: 以逗號分隔 profile IDs。strict route 不會自動 fallback 到 system。
+  fallback_note: 以逗號分隔 profile IDs。DNS 路由不會自動 fallback 到 system。
   pattern: Host Pattern
   pattern_note: 範例：`example.com`、`www.example.com`、`*.example.com`。
   profile: Profile
-  profile_note: 選擇已啟用 DNS profile。
+  profile_note: 選擇已新增的 DNS Server。
   strict: Strict
   profiles_none: 目前沒有 DNS profiles。
   routes_none: 目前沒有 DNS routes。
 
 dns:
   title: DNS 設定
-  subtitle: 管理 DNS 設定檔與 DNS 路由。
+  subtitle: 管理 RelayGate 使用的 DNS Server。
   status:
     runtime: DNS 狀態
-    profiles: DNS 設定檔
+    profiles: DNS Server
+    servers: DNS Server
     routes: DNS 路由
+    cache: DNS 快取
     enabled_total: 啟用 / 總數
+    warm_cache: 主動快取
+    observation: 觀測
+    auto_select: 自動選取
+    primary: 主要
+    observed_hosts: "{count} 個已觀測網域"
   actions:
-    profiles: 新增 DNS 設定檔
+    profiles: 新增 DNS Server
     routes: 新增 DNS 路由
-    add_profile: 新增設定檔
+    add_profile: 新增 Server
+    add_server: 新增 Server
     add_route: 新增路由
   fields:
     service: 服務
     ip: IP
     port: Port
     pattern: 網域樣式
+    strict: 嚴格
   tables:
-    profiles: DNS 設定檔
+    runtime: DNS 執行功能
+    profiles: DNS Server
+    servers: DNS Server
     routes: DNS 路由
+    health: DNS 健康度
   cols:
+    profile: 設定檔
     service: 服務
     ip: IP
     port: Port
     pattern: 網域樣式
+    mode: 模式
     status: 狀態
     action: 操作
+    score: 分數
+    success: 成功率
+    timeout: 逾時率
+    divergence: 分歧率
+    latency: 延遲
+    samples: 樣本
+    last_seen: 最近觀測
   placeholders:
     ip: IP 位址
+    pattern: "*.example.com"
+    profile: 選擇 DNS Server
   empty:
-    profiles: 目前沒有 DNS 設定檔。
+    profiles: 目前沒有 DNS Server。
+    servers: 目前沒有 DNS Server。
     routes: 目前沒有 DNS 路由。
+    health: 目前沒有 DNS 健康度觀測。
   generated: 自動產生
   routes:
     missing_profile: 設定檔不存在
+    strict: 嚴格
+    fallback: 可回退
   help:
     title: 說明
     markdown: |
-      ### DNS 設定檔
+      ### DNS Server
 
       輸入 DNS Server IP 後會新增到列表中，`Port` 未填時使用 `53`。
 
-      - 查詢優先順序依列表由上而下
-      - 指定設定檔失敗時，會依目前列表順序繼續查詢
-      - 最後會回到系統 DNS
+      - 設定會保存到 `data/user/settings.yaml`
+      - 所有 DNS Server 預設啟用
+      - 快取、觀測、自動選取與系統 fallback 由 RelayGate 使用內部預設值處理
+      - 最後仍會回到系統 DNS
 
       ### DNS 路由
 
-      這裡用來指定特定網站要優先使用哪一個 DNS 設定檔。
+      DNS 路由可讓特定網域固定使用指定 DNS Server，適合避開特定 DNS 導向錯誤主機或警示頁的情境。
 
-      - 每條路由都會先查詢指定的設定檔
-      - 指定設定檔失敗時，RelayGate 會依 DNS 設定檔順序繼續嘗試
-      - 所有自訂設定檔都失敗後，最後回到系統 DNS
-
-      ### 網域樣式
-
-      `Host Pattern` 可使用下列形式：
-
-      - `example.com`：精準比對單一網域
-      - `www.example.com`：精準比對完整主機名稱
-      - `*.example.com`：比對所有子網域
+      - `網域樣式` 可用 `example.com` 或 `*.example.com`
+      - 放進 DNS 路由的網域會只使用指定 DNS Server，不會回退到其他 DNS Server
+      - 刪除路由即可停用該規則
 
 gateway_page:
   title: 網站掛載
   sub: 將遠端網站掛到本機 URL path 底下。RelayGate 會經過一般管線抓取遠端內容，並把連結改寫回 mount path。
   add: 新增網站掛載
   list: 網站掛載清單
-  mount_path: 掛載路徑
-  mount_path_note: proxy listener 上的本機路徑。範例：`/site/`。
+  mount_path: 掛載 ID
+  mount_path_note: 輸入像 `site` 這樣的單段 ID；RelayGate 會掛成 `/site/`。
   target: 目標 Base URL
   target_note: 遠端網站 base URL。範例：`https://example.com`。
   upstream: 上游
@@ -442,7 +457,7 @@ gateway_page:
     markdown: |
       ### 網站掛載
 
-      網站掛載會把遠端網站放到本機路徑底下，例如 `/site/`。
+      網站掛載會把遠端網站放到自動產生的本機路徑底下，例如 `/site/`。
 
       ### 目標網址
 
@@ -514,11 +529,10 @@ resource_replace_page:
 
 user_script_page:
   title: 使用者腳本
-  sub: 管理放在 `data/user_script/` 的本機 `.user.js` 檔案。啟用後只會影響之後載入且符合 scope 的 HTML 文件。
-  rescan: 重新掃描
+  sub: 管理放在 `data/user/user_script/` 的本機 `.user.js` 檔案。啟用後只會影響之後載入且符合 scope 的 HTML 文件。
   open_folder: 開啟腳本資料夾
-  apply_note: 啟用 / 停用會自動重新掃描並熱套用；外部手改檔案時再按重新掃描。
   script_name: 腳本名稱
+  comment: 註解
   version: 版本
   match_scope: Match 範圍
   list: 腳本清單
@@ -536,7 +550,7 @@ user_script_page:
     error: 錯誤
   intro:
     title: 功能介紹
-    body: 使用者腳本 v1 會掃描 `data/user_script/` 底下的本機檔案，將啟用檔名記錄在 `enabled.yaml`，並把符合範圍的腳本注入可修改的 HTML 文件回應。這是相容支援，不是完整 userscript manager。
+    body: 使用者腳本 v1 會索引 `data/user/user_script/` 底下的本機檔案，將啟用狀態與 match metadata 記錄在 `data/state/user_script.bin`，並把符合範圍的腳本注入可修改的 HTML 文件回應。這是相容支援，不是完整 userscript manager。
   help:
     markdown: |
       ### 使用者腳本
@@ -549,7 +563,7 @@ user_script_page:
 
       ### 套用時機
 
-      啟用、停用或重新掃描會套用到之後載入的頁面。
+      啟用、停用或檔案變更會套用到之後載入的頁面。
 
 ca:
   title: CA 憑證
@@ -561,7 +575,7 @@ ca:
     note: 目前使用中的 RelayGate CA 私鑰路徑。
   trust:
     label: Windows 信任
-    note: 目前使用者的 Root store 是否仍信任這張 CA。
+    note: 目前使用者的 Windows 信任根中是否包含這張 CA。
     install: 安裝 CA 到 Windows
     remove: 解除信任 CA
 
@@ -580,7 +594,7 @@ backend:
     fail: "同步 Brave 規則失敗：{error}"
   ca:
     ok: 已完成本地 CA 準備，並已安裝到 Windows 信任根。
-    unverified: 安裝動作已執行，但目前仍未在 Windows 信任根中確認到這張 CA。
+    unverified: 安裝動作已執行，但目前仍未在使用者 Windows 信任根中確認到這張 CA。
     fail: "安裝 CA 到 Windows 失敗：{error}"
     remove_fail: "解除信任 CA 失敗：{error}"
     no_cert: 目前沒有本地 CA 憑證檔，無法解除信任。

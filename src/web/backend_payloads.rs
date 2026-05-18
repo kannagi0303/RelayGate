@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::response::sse::Event;
 use serde::Serialize;
 
@@ -8,15 +10,15 @@ use crate::{
         RelayGateConfig, UpstreamProtocolPolicyConfig, UpstreamProtocolPreferenceConfig,
         UpstreamRoutingConfig,
     },
-    lang,
+    dns_auto_select, lang,
     proxy::{
         mitm_upstream::MitmUpstreamProtocolPolicy, protocol_runtime::ProtocolRuntimeSnapshot,
-        resource_replace,
+        resource_replace, upstream,
     },
     rewrite,
     traffic::{HostTrafficHostSnapshot, TrafficRuntimeSnapshot},
     user_script,
-    web::{server::WebAppState, system_actions::build_mitm_status},
+    web::{server::WebAppState, system_actions::build_mitm_status_fast},
 };
 
 #[derive(Debug, Serialize)]
@@ -65,6 +67,14 @@ struct ProcessMetricsPayload {
     cpu_percent: Option<f64>,
     memory_bytes: Option<u64>,
     sample_interval_secs: u64,
+    window_secs: u64,
+    window_sample_count: usize,
+    avg_cpu_percent_15m: Option<f64>,
+    peak_cpu_percent_15m: Option<f64>,
+    avg_memory_bytes_15m: Option<u64>,
+    peak_memory_bytes_15m: Option<u64>,
+    session_peak_cpu_percent: Option<f64>,
+    session_peak_memory_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,7 +110,13 @@ struct DnsProfileItemPayload {
     mode: String,
     servers: Vec<String>,
     enabled: bool,
+    is_system: bool,
+    is_active: bool,
     fallback_profiles: Vec<String>,
+    health_score: Option<u8>,
+    average_latency_ms: Option<u64>,
+    success_rate: Option<f64>,
+    samples: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,13 +130,40 @@ struct DnsRouteItemPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct DnsObservationProfilePayload {
+    profile_id: String,
+    observed_hosts: usize,
+    samples: u64,
+    success_rate: f64,
+    timeout_rate: f64,
+    divergent_success_rate: f64,
+    average_latency_ms: Option<u64>,
+    last_latency_ms: Option<u64>,
+    last_ttl_secs: Option<u64>,
+    last_error_kind: Option<String>,
+    last_observed_age_secs: Option<u64>,
+    health_score: u8,
+}
+
+#[derive(Debug, Serialize)]
+struct DnsObservationPayload {
+    enabled: bool,
+    observed_hosts: usize,
+    profiles: Vec<DnsObservationProfilePayload>,
+}
+
+#[derive(Debug, Serialize)]
 struct DnsPayload {
     enabled: bool,
     default_profile: String,
+    active_profile: String,
     cache_entries: usize,
+    warm_cache_enabled: bool,
+    auto_select_enabled: bool,
     profiles: Vec<DnsProfileItemPayload>,
     routes: Vec<DnsRouteItemPayload>,
     profile_options: Vec<String>,
+    observation: DnsObservationPayload,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,26 +186,9 @@ struct GatewayPayload {
 }
 
 #[derive(Debug, Serialize)]
-struct AdblockFilePayload {
-    name: String,
-    size: u64,
-    source_url: Option<String>,
-    title: Option<String>,
-    tags: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
 struct AdblockPayload {
     mode_value: String,
     mode_label: String,
-    disable_mitm_fast_path: bool,
-    debug_log_enabled: bool,
-    rule_count: usize,
-    resource_count: usize,
-    custom_rule_file: String,
-    rule_dir: String,
-    files: Vec<AdblockFilePayload>,
-    resource_files: Vec<AdblockFilePayload>,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +268,26 @@ struct TrafficHostPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct ConnectionInfoPayload {
+    max_items: usize,
+    items: Vec<ConnectionInfoHostPayload>,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectionInfoHostPayload {
+    host: String,
+    route: String,
+    dns_profile: Option<String>,
+    dns_a_count: usize,
+    dns_aaaa_count: usize,
+    last_ip: Option<String>,
+    last_family: Option<String>,
+    last_result: String,
+    last_connect_ms: Option<u64>,
+    family_preference: String,
+}
+
+#[derive(Debug, Serialize)]
 struct PatchPayload {
     rule_dir: String,
     model_text: String,
@@ -259,18 +305,34 @@ struct RenderPayload {
 struct BackendEventPayload {
     session_id: String,
     changed: Vec<String>,
-    status: StatusPayload,
-    settings: SettingsPayload,
-    traffic: TrafficPayload,
-    patch: PatchPayload,
-    render: RenderPayload,
-    adblock: AdblockPayload,
-    resource_replace: ResourceReplacePayload,
-    user_script: UserScriptPayload,
-    gateway: GatewayPayload,
-    upstreams: UpstreamsPayload,
-    upstream_routes: UpstreamRoutesPayload,
-    dns: DnsPayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<StatusPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    process: Option<ProcessMetricsPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    settings: Option<SettingsPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traffic: Option<TrafficPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connection_info: Option<ConnectionInfoPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<PatchPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    render: Option<RenderPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    adblock: Option<AdblockPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resource_replace: Option<ResourceReplacePayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_script: Option<UserScriptPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway: Option<GatewayPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstreams: Option<UpstreamsPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_routes: Option<UpstreamRoutesPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dns: Option<DnsPayload>,
 }
 
 #[derive(Debug, Serialize)]
@@ -301,14 +363,56 @@ pub(crate) fn backend_event(
     config: &RelayGateConfig,
     changed: Vec<String>,
 ) -> Event {
-    json_backend_event(&build_backend_event_payload(state, config, changed))
+    json_backend_event(&backend_payload_value(state, config, changed))
 }
 
-fn build_status_payload(
+pub(crate) fn backend_payload_value(
     state: &WebAppState,
     config: &RelayGateConfig,
-    routing: &UpstreamRoutingConfig,
-) -> StatusPayload {
+    changed: Vec<String>,
+) -> serde_json::Value {
+    backend_event_payload_value(build_backend_event_payload(state, config, changed))
+}
+
+fn backend_event_payload_value(payload: BackendEventPayload) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "session_id".to_string(),
+        serde_json::Value::String(payload.session_id),
+    );
+    object.insert(
+        "changed".to_string(),
+        serde_json::to_value(payload.changed)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
+    );
+    insert_optional_payload_field(&mut object, "status", payload.status);
+    insert_optional_payload_field(&mut object, "process", payload.process);
+    insert_optional_payload_field(&mut object, "settings", payload.settings);
+    insert_optional_payload_field(&mut object, "traffic", payload.traffic);
+    insert_optional_payload_field(&mut object, "connection_info", payload.connection_info);
+    insert_optional_payload_field(&mut object, "patch", payload.patch);
+    insert_optional_payload_field(&mut object, "render", payload.render);
+    insert_optional_payload_field(&mut object, "adblock", payload.adblock);
+    insert_optional_payload_field(&mut object, "resource_replace", payload.resource_replace);
+    insert_optional_payload_field(&mut object, "user_script", payload.user_script);
+    insert_optional_payload_field(&mut object, "gateway", payload.gateway);
+    insert_optional_payload_field(&mut object, "upstreams", payload.upstreams);
+    insert_optional_payload_field(&mut object, "upstream_routes", payload.upstream_routes);
+    insert_optional_payload_field(&mut object, "dns", payload.dns);
+    serde_json::Value::Object(object)
+}
+
+fn insert_optional_payload_field<T: Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+    value: Option<T>,
+) {
+    if let Some(value) = value.and_then(|item| serde_json::to_value(item).ok()) {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn build_status_payload(state: &WebAppState, config: &RelayGateConfig) -> StatusPayload {
     let backend_signal = state.runtime.backend_signal();
     let rewrite_rule_count = state
         .rewrite_registry
@@ -317,10 +421,14 @@ fn build_status_payload(
         .unwrap_or(0);
     let adblock_mode = config.proxy.adblock.effective_mode();
     let adblock_mode_label = display_adblock_mode(adblock_mode);
-    let upstreams = routing
+    let upstream_summary = state
         .upstreams
+        .read()
+        .map(|registry| registry.status_summary())
+        .unwrap_or_else(|_| upstream::UpstreamStatusSummary::default());
+    let upstreams = upstream_summary
+        .enabled_upstreams
         .iter()
-        .filter(|item| item.enabled)
         .map(|item| format!("{} → {}", item.id, item.address))
         .collect::<Vec<_>>();
 
@@ -346,11 +454,7 @@ fn build_status_payload(
             lang::text("traffic.mode.none")
         },
         upstream_count: upstreams.len(),
-        upstream_route_count: routing
-            .upstream_routes
-            .iter()
-            .filter(|item| item.enabled)
-            .count(),
+        upstream_route_count: upstream_summary.enabled_route_count,
         resource_replace_rule_count: resource_replace::rule_count(&state.resource_replace_registry),
         adblock_mode: adblock_mode_label,
         upstreams,
@@ -381,9 +485,29 @@ fn build_protocol_runtime_status_payload(
 fn build_process_metrics_payload(metrics: crate::runtime::ProcessMetrics) -> ProcessMetricsPayload {
     ProcessMetricsPayload {
         pid: metrics.pid,
-        cpu_percent: metrics.cpu_percent,
+        cpu_percent: finite_f64_option(metrics.cpu_percent),
         memory_bytes: metrics.memory_bytes,
         sample_interval_secs: metrics.sample_interval_secs,
+        window_secs: metrics.window_secs,
+        window_sample_count: metrics.window_sample_count,
+        avg_cpu_percent_15m: finite_f64_option(metrics.avg_cpu_percent_15m),
+        peak_cpu_percent_15m: finite_f64_option(metrics.peak_cpu_percent_15m),
+        avg_memory_bytes_15m: metrics.avg_memory_bytes_15m,
+        peak_memory_bytes_15m: metrics.peak_memory_bytes_15m,
+        session_peak_cpu_percent: finite_f64_option(metrics.session_peak_cpu_percent),
+        session_peak_memory_bytes: metrics.session_peak_memory_bytes,
+    }
+}
+
+fn finite_f64_option(value: Option<f64>) -> Option<f64> {
+    value.filter(|item| item.is_finite())
+}
+
+fn finite_f64_or_zero(value: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        0.0
     }
 }
 
@@ -430,26 +554,59 @@ fn build_upstream_routes_payload(routing: &UpstreamRoutingConfig) -> UpstreamRou
 
 fn build_dns_payload(state: &WebAppState) -> DnsPayload {
     let config = state.dns_resolver.config_snapshot();
+    let observation = state.dns_resolver.observation_snapshot();
+    let observation_by_profile = observation
+        .profiles
+        .iter()
+        .map(|profile| (profile.profile_id.as_str(), profile))
+        .collect::<HashMap<_, _>>();
     let profile_options = config
         .profiles
         .iter()
-        .filter(|item| item.enabled && !matches!(item.mode, DnsProfileMode::System))
+        .filter(|item| item.enabled)
         .map(|item| item.id.clone())
         .collect::<Vec<_>>();
+    let enabled_profile_ids = config
+        .profiles
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| item.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let active_profile =
+        dns_auto_select::best_profile(&config.auto_select, &observation, &enabled_profile_ids)
+            .unwrap_or_else(|| config.default_profile.clone());
+    let mut profiles = config.profiles.iter().collect::<Vec<_>>();
+    profiles.sort_by_key(|profile| matches!(profile.mode, DnsProfileMode::System));
     DnsPayload {
         enabled: config.enabled,
         default_profile: config.default_profile.clone(),
+        active_profile: active_profile.clone(),
         cache_entries: state.dns_resolver.cache_len(),
-        profiles: config
-            .profiles
+        warm_cache_enabled: config.warm_cache.enabled,
+        auto_select_enabled: config.auto_select.enabled,
+        profiles: profiles
             .iter()
-            .filter(|item| !matches!(item.mode, DnsProfileMode::System))
             .map(|item| DnsProfileItemPayload {
                 id: item.id.clone(),
                 mode: dns_profile_mode_value(item.mode).to_string(),
                 servers: item.servers.clone(),
                 enabled: item.enabled,
+                is_system: matches!(item.mode, DnsProfileMode::System),
+                is_active: item.id == active_profile,
                 fallback_profiles: item.fallback_profiles.clone(),
+                health_score: observation_by_profile
+                    .get(item.id.as_str())
+                    .map(|profile| profile.health_score),
+                average_latency_ms: observation_by_profile
+                    .get(item.id.as_str())
+                    .and_then(|profile| profile.average_latency_ms),
+                success_rate: observation_by_profile
+                    .get(item.id.as_str())
+                    .and_then(|profile| finite_f64_option(Some(profile.success_rate))),
+                samples: observation_by_profile
+                    .get(item.id.as_str())
+                    .map(|profile| profile.samples)
+                    .unwrap_or(0),
             })
             .collect(),
         routes: config
@@ -461,13 +618,36 @@ fn build_dns_payload(state: &WebAppState) -> DnsPayload {
                 profile_id: item.profile_id.clone(),
                 strict: item.strict,
                 enabled: item.enabled,
-                profile_exists: config
-                    .profiles
-                    .iter()
-                    .any(|profile| profile.enabled && profile.id == item.profile_id),
+                profile_exists: config.profiles.iter().any(|profile| {
+                    profile.enabled
+                        && !matches!(profile.mode, DnsProfileMode::System)
+                        && profile.id == item.profile_id
+                }),
             })
             .collect(),
         profile_options,
+        observation: DnsObservationPayload {
+            enabled: config.observation.enabled,
+            observed_hosts: observation.observed_hosts,
+            profiles: observation
+                .profiles
+                .into_iter()
+                .map(|profile| DnsObservationProfilePayload {
+                    profile_id: profile.profile_id,
+                    observed_hosts: profile.observed_hosts,
+                    samples: profile.samples,
+                    success_rate: finite_f64_or_zero(profile.success_rate),
+                    timeout_rate: finite_f64_or_zero(profile.timeout_rate),
+                    divergent_success_rate: finite_f64_or_zero(profile.divergent_success_rate),
+                    average_latency_ms: profile.average_latency_ms,
+                    last_latency_ms: profile.last_latency_ms,
+                    last_ttl_secs: profile.last_ttl_secs,
+                    last_error_kind: profile.last_error_kind.map(str::to_string),
+                    last_observed_age_secs: profile.last_observed_age_secs,
+                    health_score: profile.health_score,
+                })
+                .collect(),
+        },
     }
 }
 
@@ -518,49 +698,10 @@ fn build_gateway_payload(
     }
 }
 
-fn build_adblock_payload(state: &WebAppState, config: &RelayGateConfig) -> AdblockPayload {
-    let files = adblock::list_rule_files()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|file| AdblockFilePayload {
-            name: file.name,
-            size: file.size,
-            source_url: file.source_url,
-            title: file.title,
-            tags: file.tags,
-        })
-        .collect();
-    let resource_files = adblock::list_resource_files()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|file| AdblockFilePayload {
-            name: file.name,
-            size: file.size,
-            source_url: file.source_url,
-            title: file.title,
-            tags: file.tags,
-        })
-        .collect();
-    let custom_rule_file = adblock::custom_rule_file_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| {
-            adblock::adblock_rule_dir_path()
-                .join("custom.txt")
-                .display()
-                .to_string()
-        });
-
+fn build_adblock_payload(_state: &WebAppState, config: &RelayGateConfig) -> AdblockPayload {
     AdblockPayload {
         mode_value: adblock_mode_value(config.proxy.adblock.effective_mode()).to_string(),
         mode_label: display_adblock_mode(config.proxy.adblock.effective_mode()).to_string(),
-        disable_mitm_fast_path: config.disable_mitm_fast_path,
-        debug_log_enabled: config.adblock_debug_log,
-        rule_count: adblock::rule_count(&state.adblock_state),
-        resource_count: adblock::resource_count(&state.adblock_state),
-        custom_rule_file,
-        rule_dir: adblock::adblock_rule_dir_path().display().to_string(),
-        files,
-        resource_files,
     }
 }
 
@@ -600,7 +741,7 @@ fn build_settings_payload(config: &RelayGateConfig) -> SettingsPayload {
         locale: config.locale.clone(),
         available_locales: lang::available_locales(),
         proxy_listen: config.proxy.listen.clone(),
-        mitm: build_mitm_status(config),
+        mitm: build_mitm_status_fast(config),
         protocol: build_protocol_settings_payload(config),
     }
 }
@@ -639,6 +780,29 @@ fn build_traffic_payload(state: &WebAppState, config: &RelayGateConfig) -> Traff
     }
 }
 
+fn build_connection_info_payload(state: &WebAppState) -> ConnectionInfoPayload {
+    let snapshot = state.dns_resolver.connection_info_snapshot();
+    ConnectionInfoPayload {
+        max_items: snapshot.max_items,
+        items: snapshot
+            .items
+            .into_iter()
+            .map(|item| ConnectionInfoHostPayload {
+                host: item.host,
+                route: item.route,
+                dns_profile: item.dns_profile,
+                dns_a_count: item.dns_a_count,
+                dns_aaaa_count: item.dns_aaaa_count,
+                last_ip: item.last_ip.map(|ip| ip.to_string()),
+                last_family: item.last_family,
+                last_result: item.last_result,
+                last_connect_ms: item.last_connect_ms,
+                family_preference: item.family_preference,
+            })
+            .collect(),
+    }
+}
+
 fn build_patch_payload(_config: &RelayGateConfig) -> PatchPayload {
     PatchPayload {
         rule_dir: rewrite::patch_rule_dir().display().to_string(),
@@ -660,28 +824,54 @@ fn build_backend_event_payload(
     config: &RelayGateConfig,
     changed: Vec<String>,
 ) -> BackendEventPayload {
-    let routing = current_upstream_routing(config);
+    let include_status = changed_contains(&changed, "status");
+    let include_process = changed_contains(&changed, "process");
+    let include_settings = changed_contains(&changed, "settings");
+    let include_traffic = changed_contains(&changed, "traffic");
+    let include_connection_info = changed_contains(&changed, "connection_info");
+    let include_patch = changed_contains(&changed, "patch");
+    let include_render = changed_contains(&changed, "render");
+    let include_adblock = changed_contains(&changed, "adblock");
+    let include_resource_replace = changed_contains(&changed, "resource_replace");
+    let include_user_script = changed_contains(&changed, "user_script");
+    let include_gateway = changed_contains(&changed, "gateway");
+    let include_upstreams = changed_contains(&changed, "upstreams");
+    let include_upstream_routes = changed_contains(&changed, "upstream_routes");
+    let include_dns = changed_contains(&changed, "dns");
+
+    let needs_routing = include_gateway || include_upstreams || include_upstream_routes;
+    let routing = needs_routing.then(|| current_upstream_routing(config));
+
     BackendEventPayload {
         session_id: state.runtime.session_id().to_string(),
         changed,
-        status: build_status_payload(state, config, &routing),
-        settings: build_settings_payload(config),
-        traffic: build_traffic_payload(state, config),
-        patch: build_patch_payload(config),
-        render: build_render_payload(config),
-        adblock: build_adblock_payload(state, config),
-        resource_replace: build_resource_replace_payload(state),
-        user_script: build_user_script_payload(state),
-        gateway: build_gateway_payload(config, &routing),
-        upstreams: build_upstreams_payload(&routing),
-        upstream_routes: build_upstream_routes_payload(&routing),
-        dns: build_dns_payload(state),
+        status: include_status.then(|| build_status_payload(state, config)),
+        process: include_process
+            .then(|| build_process_metrics_payload(state.runtime.process_metrics())),
+        settings: include_settings.then(|| build_settings_payload(config)),
+        traffic: include_traffic.then(|| build_traffic_payload(state, config)),
+        connection_info: include_connection_info.then(|| build_connection_info_payload(state)),
+        patch: include_patch.then(|| build_patch_payload(config)),
+        render: include_render.then(|| build_render_payload(config)),
+        adblock: include_adblock.then(|| build_adblock_payload(state, config)),
+        resource_replace: include_resource_replace.then(|| build_resource_replace_payload(state)),
+        user_script: include_user_script.then(|| build_user_script_payload(state)),
+        gateway: include_gateway
+            .then(|| build_gateway_payload(config, routing.as_ref().expect("routing loaded"))),
+        upstreams: include_upstreams
+            .then(|| build_upstreams_payload(routing.as_ref().expect("routing loaded"))),
+        upstream_routes: include_upstream_routes
+            .then(|| build_upstream_routes_payload(routing.as_ref().expect("routing loaded"))),
+        dns: include_dns.then(|| build_dns_payload(state)),
     }
 }
 
+fn changed_contains(changed: &[String], key: &str) -> bool {
+    changed.iter().any(|item| item == key)
+}
+
 fn current_upstream_routing(config: &RelayGateConfig) -> UpstreamRoutingConfig {
-    UpstreamRoutingConfig::load_default_or_config(config)
-        .unwrap_or_else(|_| UpstreamRoutingConfig::from_main_config(config))
+    UpstreamRoutingConfig::from_main_config(config)
 }
 
 fn json_backend_event<T: Serialize>(payload: &T) -> Event {

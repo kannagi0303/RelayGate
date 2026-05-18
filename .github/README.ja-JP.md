@@ -113,9 +113,10 @@ http://127.0.0.1:8787/
 
 RelayGate は実行されたディレクトリの下に runtime data を作成することがあります。
 
-これには、ローカル設定、logs、DNS cache、ルールデータ、HTTPS MITM CA ファイルなどが含まれます。
+ユーザー所有のデータは `data/user/` に置かれます。RelayGate が生成する state は `data/state/` に置かれます。
+これには、ローカル設定、logs、DNS cache、ルールデータ、ダウンロードされた adblock data、learned connection health、diagnostics、HTTPS MITM CA ファイルなどが含まれます。
 
-Runtime data、特に CA 関連ファイルは公開しないでください。
+Runtime data、特に `data/state/mitm/` 以下の CA 関連ファイルは公開しないでください。
 
 詳しくは [Privacy And Data](../docs/ja-JP/privacy-and-data.md) を参照してください。
 

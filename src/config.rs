@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     env, fs,
+    io::Write,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
@@ -13,14 +14,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::path_mode::{app_path_mode, AppPathMode};
 
-/// Top-level config file structure.
-/// This maps to the full `relaygate.yaml` content in the project root.
+/// Runtime config model.
+///
+/// `relaygate.yaml` is the minimal root config and only stores startup-level
+/// values such as `listen`, `dns_server`, and `locale`. Module/user intent stores live under
+/// `data/user/` as separate files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayGateConfig {
     #[serde(default = "default_proxy_listen")]
     pub listen: String,
     #[serde(default = "default_locale", skip_serializing_if = "is_default_locale")]
     pub locale: String,
+    #[serde(default, skip_serializing)]
+    pub dns_server: DnsServerConfig,
     #[serde(default, skip_serializing_if = "is_default_adblock_mode_setting")]
     pub adblock_mode: AdblockModeSetting,
     #[serde(
@@ -35,12 +41,10 @@ pub struct RelayGateConfig {
     pub downstream_protocol: DownstreamProtocolPreferenceConfig,
     #[serde(default, skip_serializing_if = "is_default_h3_streaming_response_mode")]
     pub h3_streaming_mode: Http3StreamingResponseModeConfig,
-    /// Debug switch: force MITM responses through the full body pipeline instead of the streaming fast path.
+    /// Deprecated compatibility flag for older settings. Product defaults always keep the MITM fast
+    /// path enabled.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_mitm_fast_path: bool,
-    /// Debug switch: write adblock request matching decisions to data/logs/adblock-debug.log.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub adblock_debug_log: bool,
     #[serde(default, skip_serializing)]
     pub app: AppConfig,
     #[serde(default, skip_serializing)]
@@ -65,17 +69,212 @@ pub struct RelayGateConfig {
     pub rules: Vec<RuleConfig>,
 }
 
+const RELAYGATE_SETTINGS_STORE_FILE_NAME: &str = "settings.yaml";
+const RELAYGATE_ROOT_CONFIG_FILE_NAME: &str = "relaygate.yaml";
+const GATEWAY_USER_DIR_NAME: &str = "gateway";
+const GATEWAY_MOUNT_FILE_EXTENSION: &str = "yaml";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RelayGateSettingsStore {
+    #[serde(default)]
+    adblock: RelayGateSettingsAdblock,
+    #[serde(default)]
+    protocol: RelayGateSettingsProtocol,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    upstreams: Vec<UpstreamConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    upstream_routes: Vec<UpstreamRouteConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rules: Vec<RuleConfig>,
+    #[serde(default, skip_serializing_if = "DnsUserConfig::is_empty")]
+    dns: DnsUserConfig,
+}
+
+impl Default for RelayGateSettingsStore {
+    fn default() -> Self {
+        Self::from_config(&RelayGateConfig::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct RelayGateSettingsAdblock {
+    #[serde(default = "default_adblock_mode_setting")]
+    mode: AdblockModeSetting,
+}
+
+impl Default for RelayGateSettingsAdblock {
+    fn default() -> Self {
+        Self {
+            mode: default_adblock_mode_setting(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct RelayGateSettingsProtocol {
+    #[serde(default = "default_upstream_protocol_preference")]
+    upstream: UpstreamProtocolPreferenceConfig,
+    #[serde(default = "default_downstream_protocol_preference")]
+    downstream: DownstreamProtocolPreferenceConfig,
+    #[serde(default)]
+    h3_streaming: Http3StreamingResponseModeConfig,
+}
+
+impl Default for RelayGateSettingsProtocol {
+    fn default() -> Self {
+        Self {
+            upstream: default_upstream_protocol_preference(),
+            downstream: default_downstream_protocol_preference(),
+            h3_streaming: Http3StreamingResponseModeConfig::default(),
+        }
+    }
+}
+
+impl RelayGateSettingsStore {
+    fn from_config(config: &RelayGateConfig) -> Self {
+        Self {
+            adblock: RelayGateSettingsAdblock {
+                mode: config.adblock_mode,
+            },
+            protocol: RelayGateSettingsProtocol {
+                upstream: config.upstream_protocol,
+                downstream: config.downstream_protocol,
+                h3_streaming: config.h3_streaming_mode,
+            },
+            upstreams: config.upstreams.clone(),
+            upstream_routes: config.upstream_routes.clone(),
+            rules: config.rules.clone(),
+            dns: DnsUserConfig::default(),
+        }
+    }
+
+    fn into_config(self) -> Result<RelayGateConfig> {
+        let mut config = RelayGateConfig {
+            adblock_mode: self.adblock.mode,
+            upstream_protocol: self.protocol.upstream,
+            downstream_protocol: self.protocol.downstream,
+            h3_streaming_mode: self.protocol.h3_streaming,
+            disable_mitm_fast_path: false,
+            upstreams: self.upstreams,
+            upstream_routes: self.upstream_routes,
+            rules: self.rules,
+            ..RelayGateConfig::default()
+        };
+        config.apply_fixed_product_defaults();
+        Ok(config)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RelayGateRootConfig {
+    #[serde(default)]
+    listen: RelayGateRootListenConfig,
+    #[serde(default, skip_serializing_if = "DnsServerConfig::is_default_disabled")]
+    dns_server: DnsServerConfig,
+    #[serde(default = "default_locale")]
+    locale: String,
+}
+
+impl Default for RelayGateRootConfig {
+    fn default() -> Self {
+        Self {
+            listen: RelayGateRootListenConfig::default(),
+            dns_server: DnsServerConfig::default(),
+            locale: default_locale(),
+        }
+    }
+}
+
+impl RelayGateRootConfig {
+    fn from_config(config: &RelayGateConfig) -> Self {
+        let (host, port) = split_listen_address(&config.listen)
+            .unwrap_or_else(|_| (default_listen_host(), default_listen_port()));
+        Self {
+            listen: RelayGateRootListenConfig { host, port },
+            dns_server: config.dns_server.clone(),
+            locale: config.locale.clone(),
+        }
+    }
+
+    fn apply_to_config(&self, config: &mut RelayGateConfig) {
+        config.listen = self.listen.to_listen_string();
+        config.dns_server = self.dns_server.clone();
+        config.locale = self.locale.clone();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RelayGateRootListenConfig {
+    #[serde(default = "default_listen_host")]
+    host: String,
+    #[serde(default = "default_listen_port")]
+    port: u16,
+}
+
+impl Default for RelayGateRootListenConfig {
+    fn default() -> Self {
+        Self {
+            host: default_listen_host(),
+            port: default_listen_port(),
+        }
+    }
+}
+
+impl RelayGateRootListenConfig {
+    fn to_listen_string(&self) -> String {
+        format_listen_address(&self.host, self.port)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsServerConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default = "default_dns_server_listen_port")]
+    pub port: u16,
+}
+
+impl Default for DnsServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: None,
+            port: default_dns_server_listen_port(),
+        }
+    }
+}
+
+impl DnsServerConfig {
+    fn is_default_disabled(&self) -> bool {
+        !self.enabled && self.host.is_none() && self.port == default_dns_server_listen_port()
+    }
+
+    pub fn effective_host(&self, proxy_listen: &str) -> String {
+        self.host.clone().unwrap_or_else(|| {
+            split_listen_address(proxy_listen)
+                .map(|(host, _)| host)
+                .unwrap_or_else(|_| default_listen_host())
+        })
+    }
+
+    pub fn listen_address(&self, proxy_listen: &str) -> String {
+        format_listen_address(&self.effective_host(proxy_listen), self.port)
+    }
+}
+
 impl Default for RelayGateConfig {
     fn default() -> Self {
         Self {
             listen: default_proxy_listen(),
             locale: default_locale(),
+            dns_server: DnsServerConfig::default(),
             adblock_mode: AdblockModeSetting::Aggressive,
             upstream_protocol: UpstreamProtocolPreferenceConfig::GuardedH3,
             downstream_protocol: DownstreamProtocolPreferenceConfig::Http2Enabled,
             h3_streaming_mode: Http3StreamingResponseModeConfig::default(),
             disable_mitm_fast_path: false,
-            adblock_debug_log: false,
             app: AppConfig {
                 name: "RelayGate".to_string(),
             },
@@ -298,7 +497,7 @@ impl Default for ProxyUpstreamConfig {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Http3StreamingResponseModeConfig {
-    /// Disable active H3 response byte-pump even when the legacy boolean is true.
+    /// Disable active H3 response byte-pump.
     Disabled,
     /// Only video/audio-like responses may use active H3 progressive forwarding.
     MediaOnly,
@@ -551,6 +750,86 @@ pub struct GatewayConfig {
     pub mounts: Vec<MountSiteConfig>,
 }
 
+impl GatewayConfig {
+    pub fn load_default() -> Result<Self> {
+        Self::load_from_dir(&Self::default_dir()?)
+    }
+
+    pub fn default_dir() -> Result<PathBuf> {
+        Ok(preferred_base_dir()?
+            .join("data")
+            .join("user")
+            .join(GATEWAY_USER_DIR_NAME))
+    }
+
+    pub fn load_from_dir(dir: &Path) -> Result<Self> {
+        if !dir.exists() {
+            return Ok(Self::default());
+        }
+
+        let mut mounts = Vec::new();
+        for entry in fs::read_dir(dir)
+            .with_context(|| format!("failed to read gateway directory: {}", dir.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("failed to read gateway entry in {}", dir.display()))?;
+            let path = entry.path();
+            if !path.is_file() || !is_gateway_mount_yaml_file(&path) {
+                continue;
+            }
+            let id = gateway_mount_id_from_file_path(&path)?;
+            let content = fs::read_to_string(&path).with_context(|| {
+                format!("failed to read gateway mount file: {}", path.display())
+            })?;
+            let file_config = serde_yaml::from_str::<GatewayMountFileConfig>(&content)
+                .with_context(|| {
+                    format!("failed to parse gateway mount file: {}", path.display())
+                })?;
+            mounts.push(file_config.into_mount(id));
+        }
+        mounts.sort_by(|left, right| left.id.cmp(&right.id));
+
+        let config = Self { mounts };
+        validate_gateway_mounts(&config.mounts, None)?;
+        Ok(config)
+    }
+
+    pub fn save_mount_default(mount: &MountSiteConfig) -> Result<()> {
+        let dir = Self::default_dir()?;
+        Self::save_mount_to_dir(&dir, mount)
+    }
+
+    pub fn save_mount_to_dir(dir: &Path, mount: &MountSiteConfig) -> Result<()> {
+        validate_gateway_mount_id(&mount.id)?;
+        let expected_path = gateway_mount_path_from_id(&mount.id);
+        if mount.mount_path != expected_path {
+            bail!(
+                "gateway mount `{}` must use mount_path `{}` derived from its id",
+                mount.id,
+                expected_path
+            );
+        }
+        validate_target_base_url("gateway.mount.target_base_url", &mount.target_base_url)?;
+        let file_config = GatewayMountFileConfig::from_mount(mount);
+        let yaml = serde_yaml::to_string(&file_config)
+            .context("failed to serialize gateway mount file")?;
+        let path = gateway_mount_file_path(dir, &mount.id);
+        write_atomic(&path, yaml.as_bytes())
+            .with_context(|| format!("failed to write gateway mount file: {}", path.display()))
+    }
+
+    pub fn delete_mount_default(id: &str) -> Result<bool> {
+        validate_gateway_mount_id(id)?;
+        let path = gateway_mount_file_path(&Self::default_dir()?, id);
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to delete gateway mount file: {}", path.display()))?;
+        Ok(true)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MountSiteConfig {
     /// Mount name for identification.
@@ -580,6 +859,47 @@ pub struct MountSiteConfig {
 #[serde(rename_all = "snake_case")]
 pub enum MinimalPageMode {
     OnejavTorrent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GatewayMountFileConfig {
+    pub target_base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub rewrite_links: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub passthrough_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimal_page_mode: Option<MinimalPageMode>,
+}
+
+impl GatewayMountFileConfig {
+    fn from_mount(mount: &MountSiteConfig) -> Self {
+        Self {
+            target_base_url: mount.target_base_url.clone(),
+            upstream_id: mount.upstream_id.clone(),
+            enabled: mount.enabled,
+            rewrite_links: mount.rewrite_links,
+            passthrough_mode: mount.passthrough_mode,
+            minimal_page_mode: mount.minimal_page_mode.clone(),
+        }
+    }
+
+    fn into_mount(self, id: String) -> MountSiteConfig {
+        MountSiteConfig {
+            mount_path: gateway_mount_path_from_id(&id),
+            id,
+            target_base_url: self.target_base_url,
+            upstream_id: self.upstream_id,
+            enabled: self.enabled,
+            rewrite_links: self.rewrite_links,
+            passthrough_mode: self.passthrough_mode,
+            minimal_page_mode: self.minimal_page_mode,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -623,41 +943,6 @@ impl UpstreamRoutingConfig {
     pub fn validate(&self) -> Result<()> {
         validate_upstream_routing(&self.upstreams, &self.upstream_routes)
     }
-
-    pub fn load_default_or_config(config: &RelayGateConfig) -> Result<Self> {
-        let path = Self::default_path()?;
-        if path.exists() {
-            return Self::load_from_path(&path);
-        }
-
-        Ok(Self::from_main_config(config))
-    }
-
-    pub fn load_from_path(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read upstream routing file: {}", path.display()))?;
-        serde_yaml::from_str::<Self>(&content)
-            .with_context(|| format!("failed to parse upstream routing file: {}", path.display()))
-    }
-
-    pub fn save_default(&self) -> Result<()> {
-        let path = Self::default_path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create upstream routing directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let yaml = serde_yaml::to_string(self)?;
-        fs::write(&path, yaml)
-            .with_context(|| format!("failed to write upstream routing file: {}", path.display()))
-    }
-
-    pub fn default_path() -> Result<PathBuf> {
-        Ok(preferred_base_dir()?.join("data").join("upstreams.yaml"))
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -673,9 +958,210 @@ pub struct DnsConfig {
     #[serde(default = "default_dns_refresh_before_expire_secs")]
     pub refresh_before_expire_secs: u64,
     #[serde(default)]
+    pub warm_cache: DnsWarmCacheConfig,
+    #[serde(default)]
+    pub observation: DnsObservationConfig,
+    #[serde(default)]
+    pub auto_select: DnsAutoSelectConfig,
+    #[serde(default)]
     pub profiles: Vec<DnsProfileConfig>,
     #[serde(default)]
     pub routes: Vec<DnsRouteConfig>,
+}
+
+const DNS_USER_PROFILE_PREFIX: &str = "server";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct DnsUserConfig {
+    #[serde(default)]
+    servers: Vec<DnsServerEntryConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    routes: Vec<DnsUserRouteConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DnsServerEntryConfig {
+    ip: String,
+    #[serde(default = "default_dns_server_port")]
+    port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DnsUserRouteConfig {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    id: String,
+    host_pattern: String,
+    profile_id: String,
+}
+
+const fn default_dns_server_port() -> u16 {
+    53
+}
+
+impl DnsUserConfig {
+    fn is_empty(&self) -> bool {
+        self.servers.is_empty() && self.routes.is_empty()
+    }
+
+    fn from_config(config: &DnsConfig) -> Self {
+        let mut seen = HashSet::new();
+        let mut servers = Vec::new();
+        for profile in &config.profiles {
+            if profile.mode != DnsProfileMode::Udp {
+                continue;
+            }
+            for server in &profile.servers {
+                let Ok(addr) = server.parse::<SocketAddr>() else {
+                    continue;
+                };
+                let key = addr.to_string();
+                if !seen.insert(key) {
+                    continue;
+                }
+                servers.push(DnsServerEntryConfig {
+                    ip: addr.ip().to_string(),
+                    port: addr.port(),
+                });
+            }
+        }
+        let route_profile_ids = config
+            .profiles
+            .iter()
+            .filter(|profile| profile.enabled && profile.mode != DnsProfileMode::System)
+            .map(|profile| profile.id.as_str())
+            .collect::<HashSet<_>>();
+        let routes = config
+            .routes
+            .iter()
+            .filter(|route| route.enabled && route_profile_ids.contains(route.profile_id.as_str()))
+            .map(|route| DnsUserRouteConfig {
+                id: route.id.clone(),
+                host_pattern: route.host_pattern.clone(),
+                profile_id: route.profile_id.clone(),
+            })
+            .collect();
+        Self { servers, routes }
+    }
+
+    fn into_config(self) -> Result<DnsConfig> {
+        let mut config = DnsConfig::default();
+        config.enabled = true;
+        config.default_profile = default_dns_profile_id();
+        config.profiles = vec![DnsProfileConfig::system()];
+        config.routes = Vec::new();
+
+        let mut seen = HashSet::new();
+        for server in self.servers {
+            let ip = server
+                .ip
+                .trim()
+                .parse::<IpAddr>()
+                .with_context(|| format!("invalid DNS server IP `{}`", server.ip.trim()))?;
+            if server.port == 0 {
+                bail!("DNS server `{ip}` port must be greater than 0");
+            }
+            let addr = SocketAddr::new(ip, server.port);
+            if !seen.insert(addr) {
+                continue;
+            }
+            config.profiles.push(DnsProfileConfig {
+                id: dns_profile_id_from_server(ip, server.port),
+                mode: DnsProfileMode::Udp,
+                servers: vec![addr.to_string()],
+                enabled: true,
+                timeout_ms: default_dns_timeout_ms(),
+                attempts: default_dns_attempts(),
+                cache_ttl_min_secs: default_dns_cache_ttl_min_secs(),
+                cache_ttl_max_secs: default_dns_cache_ttl_max_secs(),
+                negative_ttl_secs: default_dns_negative_ttl_secs(),
+                stale_fallback_secs: default_dns_stale_fallback_secs(),
+                fallback_profiles: vec![default_dns_profile_id()],
+            });
+        }
+
+        let route_profile_ids = config
+            .profiles
+            .iter()
+            .filter(|profile| profile.mode != DnsProfileMode::System)
+            .map(|profile| profile.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut route_ids = HashSet::new();
+        for route in self.routes {
+            let host_pattern = route.host_pattern.trim().to_ascii_lowercase();
+            if host_pattern.is_empty() {
+                continue;
+            }
+            let profile_id = route.profile_id.trim().to_string();
+            if !route_profile_ids.contains(profile_id.as_str()) {
+                bail!(
+                    "DNS route `{}` references missing DNS server `{}`",
+                    host_pattern,
+                    profile_id
+                );
+            }
+            let mut id = if route.id.trim().is_empty() {
+                dns_route_id_from_pattern(&host_pattern)
+            } else {
+                dns_sanitize_id(&route.id)
+            };
+            if id.is_empty() {
+                id = "route".to_string();
+            }
+            let base_id = id.clone();
+            let mut suffix = 2usize;
+            while !route_ids.insert(id.clone()) {
+                id = format!("{base_id}-{suffix}");
+                suffix += 1;
+            }
+            config.routes.push(DnsRouteConfig {
+                id,
+                host_pattern,
+                profile_id,
+                strict: true,
+                enabled: true,
+            });
+        }
+
+        Ok(config)
+    }
+}
+
+fn dns_profile_id_from_server(ip: IpAddr, port: u16) -> String {
+    let mut id = ip
+        .to_string()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    let id = id.trim_matches('-');
+    if port == 53 {
+        format!("{DNS_USER_PROFILE_PREFIX}-{id}")
+    } else {
+        format!("{DNS_USER_PROFILE_PREFIX}-{id}-{port}")
+    }
+}
+
+fn dns_route_id_from_pattern(host_pattern: &str) -> String {
+    let id = dns_sanitize_id(host_pattern);
+    if id.is_empty() {
+        "route".to_string()
+    } else {
+        format!("route-{id}")
+    }
+}
+
+fn dns_sanitize_id(value: &str) -> String {
+    let mut id = value
+        .trim()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id.trim_matches('-').to_ascii_lowercase()
 }
 
 impl Default for DnsConfig {
@@ -686,8 +1172,98 @@ impl Default for DnsConfig {
             max_cache_entries: default_dns_max_cache_entries(),
             stale_while_revalidate: true,
             refresh_before_expire_secs: default_dns_refresh_before_expire_secs(),
+            warm_cache: DnsWarmCacheConfig::default(),
+            observation: DnsObservationConfig::default(),
+            auto_select: DnsAutoSelectConfig::default(),
             profiles: vec![DnsProfileConfig::system()],
             routes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsWarmCacheConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dns_warm_cache_max_hosts")]
+    pub max_hosts: usize,
+    #[serde(default = "default_dns_warm_cache_scan_interval_secs")]
+    pub scan_interval_secs: u64,
+    #[serde(default = "default_dns_warm_cache_refresh_when_ttl_below_secs")]
+    pub refresh_when_ttl_below_secs: u64,
+    #[serde(default = "default_dns_warm_cache_min_hits")]
+    pub min_hits: u64,
+    #[serde(default = "default_dns_warm_cache_active_within_secs")]
+    pub active_within_secs: u64,
+    #[serde(default = "default_dns_warm_cache_min_refresh_interval_secs")]
+    pub min_refresh_interval_secs: u64,
+    #[serde(default = "default_dns_warm_cache_max_failures")]
+    pub max_consecutive_failures: u32,
+    #[serde(default = "default_true")]
+    pub exclude_ephemeral_cdn_hosts: bool,
+}
+
+impl Default for DnsWarmCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_hosts: default_dns_warm_cache_max_hosts(),
+            scan_interval_secs: default_dns_warm_cache_scan_interval_secs(),
+            refresh_when_ttl_below_secs: default_dns_warm_cache_refresh_when_ttl_below_secs(),
+            min_hits: default_dns_warm_cache_min_hits(),
+            active_within_secs: default_dns_warm_cache_active_within_secs(),
+            min_refresh_interval_secs: default_dns_warm_cache_min_refresh_interval_secs(),
+            max_consecutive_failures: default_dns_warm_cache_max_failures(),
+            exclude_ephemeral_cdn_hosts: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsObservationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dns_observation_max_hosts_per_scan")]
+    pub max_hosts_per_scan: usize,
+    #[serde(default = "default_dns_observation_min_interval_secs_per_host")]
+    pub min_interval_secs_per_host: u64,
+    #[serde(default = "default_dns_observation_max_profiles_per_host")]
+    pub max_profiles_per_host: usize,
+}
+
+impl Default for DnsObservationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_hosts_per_scan: default_dns_observation_max_hosts_per_scan(),
+            min_interval_secs_per_host: default_dns_observation_min_interval_secs_per_host(),
+            max_profiles_per_host: default_dns_observation_max_profiles_per_host(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsAutoSelectConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_dns_auto_select_min_samples")]
+    pub min_samples: u64,
+    #[serde(default = "default_dns_auto_select_min_success_rate")]
+    pub min_success_rate: f64,
+    #[serde(default = "default_dns_auto_select_min_health_score")]
+    pub min_health_score: u8,
+    #[serde(default = "default_dns_auto_select_stickiness_secs")]
+    pub stickiness_secs: u64,
+}
+
+impl Default for DnsAutoSelectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_samples: default_dns_auto_select_min_samples(),
+            min_success_rate: default_dns_auto_select_min_success_rate(),
+            min_health_score: default_dns_auto_select_min_health_score(),
+            stickiness_secs: default_dns_auto_select_stickiness_secs(),
         }
     }
 }
@@ -769,30 +1345,42 @@ impl DnsConfig {
     }
 
     pub fn load_from_path(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read DNS config file: {}", path.display()))?;
-        serde_yaml::from_str::<Self>(&content)
-            .with_context(|| format!("failed to parse DNS config file: {}", path.display()))
+        let Some(store) = load_settings_store_optional(path)? else {
+            return Ok(Self::default());
+        };
+        store.dns.into_config()
     }
 
     pub fn save_default(&self) -> Result<()> {
         let path = Self::default_path()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create DNS config directory: {}",
-                    parent.display()
-                )
-            })?;
-        }
-        let yaml = serde_yaml::to_string(self)?;
-        fs::write(&path, yaml)
-            .with_context(|| format!("failed to write DNS config file: {}", path.display()))
+        self.save_to_path(&path)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        let mut store = load_settings_store_optional(path)?.unwrap_or_default();
+        store.dns = DnsUserConfig::from_config(self);
+        let yaml = serde_yaml::to_string(&store).context("failed to serialize settings file")?;
+        write_atomic(path, yaml.as_bytes())
+            .with_context(|| format!("failed to write DNS settings section: {}", path.display()))
     }
 
     pub fn default_path() -> Result<PathBuf> {
-        Ok(preferred_base_dir()?.join("data").join("dns.yaml"))
+        RelayGateConfig::settings_store_path()
     }
+}
+
+fn load_settings_store_optional(path: &Path) -> Result<Option<RelayGateSettingsStore>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read settings file: {}", path.display()))?;
+    if content.trim().is_empty() {
+        return Ok(Some(RelayGateSettingsStore::default()));
+    }
+    let store: RelayGateSettingsStore = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse settings file: {}", path.display()))?;
+    Ok(Some(store))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -864,6 +1452,7 @@ impl RelayGateConfig {
         self.proxy.connect = ConnectPolicyConfig::default();
         self.proxy.mitm = MitmConfig::default();
         self.proxy.upstream = ProxyUpstreamConfig::default();
+        self.disable_mitm_fast_path = false;
         self.apply_protocol_preferences();
         self.proxy.adblock = AdblockConfig {
             enabled: true,
@@ -921,54 +1510,143 @@ impl RelayGateConfig {
         };
     }
 
-    /// Load the config from the default path.
-    /// The target deployment layout keeps `relaygate.yaml` next to the executable.
+    /// Load the merged runtime config from root config plus module settings.
     pub fn load_default() -> Result<Self> {
-        let path = Self::default_path()?;
-        Self::load_from_path(&path)
+        Self::load_default_or_builtin().map(|(config, _)| config)
     }
 
     pub fn load_default_or_builtin() -> Result<(Self, bool)> {
-        if let Some(path) = Self::find_existing_default_path()? {
-            return Ok((Self::load_from_path(&path)?, false));
-        }
+        let settings_path = Self::find_existing_settings_store_path()?;
+        let root_path = Self::find_existing_root_config_path()?;
 
-        let mut config = Self::default();
+        let mut config = if let Some(path) = settings_path.as_deref() {
+            Self::load_settings_from_path(path)?
+        } else {
+            Self::default()
+        };
+
+        let root_config = if let Some(path) = root_path.as_deref() {
+            Self::load_root_config_from_path(path)?
+        } else {
+            RelayGateRootConfig::default()
+        };
+        root_config.apply_to_config(&mut config);
+        config.gateway = GatewayConfig::load_default()?;
         config.apply_fixed_product_defaults();
-        Ok((config, true))
+
+        Ok((config, settings_path.is_none() && root_path.is_none()))
     }
 
     pub fn default_path() -> Result<PathBuf> {
-        Ok(preferred_base_dir()?.join("relaygate.yaml"))
+        Self::settings_store_path()
     }
 
-    pub fn find_existing_default_path() -> Result<Option<PathBuf>> {
+    pub fn settings_store_path() -> Result<PathBuf> {
+        Ok(preferred_base_dir()?
+            .join("data")
+            .join("user")
+            .join(RELAYGATE_SETTINGS_STORE_FILE_NAME))
+    }
+
+    pub fn root_config_path() -> Result<PathBuf> {
+        Ok(preferred_base_dir()?.join(RELAYGATE_ROOT_CONFIG_FILE_NAME))
+    }
+
+    pub fn find_existing_settings_store_path() -> Result<Option<PathBuf>> {
         for base_dir in candidate_base_dirs()? {
-            let path = base_dir.join("relaygate.yaml");
+            let path = base_dir
+                .join("data")
+                .join("user")
+                .join(RELAYGATE_SETTINGS_STORE_FILE_NAME);
             if path.exists() {
                 return Ok(Some(path));
             }
         }
-
         Ok(None)
     }
 
-    /// Read and parse YAML from a specific path.
-    pub fn load_from_path(path: &Path) -> Result<Self> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("failed to read config file: {}", path.display()))?;
-
-        let mut config = serde_yaml::from_str::<Self>(&content)
-            .with_context(|| format!("failed to parse config file: {}", path.display()))?;
-        config.apply_fixed_product_defaults();
-
-        Ok(config)
+    pub fn find_existing_root_config_path() -> Result<Option<PathBuf>> {
+        for base_dir in candidate_base_dirs()? {
+            let path = base_dir.join(RELAYGATE_ROOT_CONFIG_FILE_NAME);
+            if path.exists() {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
     }
 
-    /// Reload the config.
-    /// This currently does a synchronous file reload. Hot reload can be added later.
-    pub fn reload(&mut self, path: &Path) -> Result<()> {
-        *self = Self::load_from_path(path)?;
+    pub fn load_root_locale_default() -> Result<Option<String>> {
+        let Some(path) = Self::find_existing_root_config_path()? else {
+            return Ok(None);
+        };
+        let root = Self::load_root_config_from_path(&path)?;
+        Ok(Some(root.locale))
+    }
+
+    pub fn load_from_path(path: &Path) -> Result<Self> {
+        Self::load_settings_from_path(path)
+    }
+
+    pub fn load_settings_from_path(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read settings file: {}", path.display()))?;
+        if content.trim().is_empty() {
+            return RelayGateSettingsStore::default().into_config();
+        }
+        let store: RelayGateSettingsStore = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse settings file: {}", path.display()))?;
+        store.into_config()
+    }
+
+    fn load_root_config_from_path(path: &Path) -> Result<RelayGateRootConfig> {
+        let content = fs::read_to_string(path)
+            .with_context(|| format!("failed to read root config file: {}", path.display()))?;
+        if content.trim().is_empty() {
+            return Ok(RelayGateRootConfig::default());
+        }
+
+        serde_yaml::from_str::<RelayGateRootConfig>(&content)
+            .with_context(|| format!("failed to parse root config file: {}", path.display()))
+    }
+
+    pub fn save_default(&self) -> Result<()> {
+        self.save_settings_default()
+    }
+
+    pub fn save_settings_default(&self) -> Result<()> {
+        let path = Self::settings_store_path()?;
+        self.save_settings_to_path(&path)
+    }
+
+    pub fn save_to_path(&self, path: &Path) -> Result<()> {
+        self.save_settings_to_path(path)
+    }
+
+    pub fn save_settings_to_path(&self, path: &Path) -> Result<()> {
+        let mut store = RelayGateSettingsStore::from_config(self);
+        if let Some(existing) = load_settings_store_optional(path)? {
+            store.dns = existing.dns;
+        }
+        let yaml = serde_yaml::to_string(&store).context("failed to serialize settings file")?;
+        write_atomic(path, yaml.as_bytes())
+            .with_context(|| format!("failed to write settings file: {}", path.display()))
+    }
+
+    pub fn save_root_config_default(&self) -> Result<()> {
+        let path = Self::root_config_path()?;
+        self.save_root_config_to_path(&path)
+    }
+
+    pub fn save_root_config_to_path(&self, path: &Path) -> Result<()> {
+        let root = RelayGateRootConfig::from_config(self);
+        let yaml = serde_yaml::to_string(&root).context("failed to serialize root config")?;
+        write_atomic(path, yaml.as_bytes())
+            .with_context(|| format!("failed to write root config file: {}", path.display()))
+    }
+
+    /// Reload the merged runtime config.
+    pub fn reload(&mut self) -> Result<()> {
+        *self = Self::load_default()?;
         Ok(())
     }
 
@@ -984,6 +1662,10 @@ impl RelayGateConfig {
     pub fn validate(&self) -> Result<()> {
         validate_listen("proxy.listen", &self.proxy.listen)?;
         validate_listen("web.listen", &self.web.listen)?;
+        if self.dns_server.enabled {
+            let dns_server_listen = self.dns_server.listen_address(&self.listen);
+            validate_listen("dns_server.listen", &dns_server_listen)?;
+        }
         validate_lan_boundary("proxy", &self.proxy.listen, self.proxy.allow_lan)?;
         validate_lan_boundary("web", &self.web.listen, self.web.allow_lan)?;
         validate_allowed_clients(
@@ -1007,7 +1689,7 @@ impl RelayGateConfig {
         Ok(())
     }
 
-    /// Validate references that may depend on the external `data/upstreams.yaml` file.
+    /// Validate references that depend on the runtime upstream registry.
     pub fn validate_runtime_references(&self, upstreams: &UpstreamRoutingConfig) -> Result<()> {
         validate_rules(&self.rules, Some(&upstreams.upstreams))?;
         validate_gateway_mounts(&self.gateway.mounts, Some(&upstreams.upstreams))
@@ -1210,6 +1892,48 @@ fn validate_dns_config(config: &DnsConfig) -> Result<()> {
     if config.stale_while_revalidate && config.refresh_before_expire_secs == 0 {
         bail!("dns.refresh_before_expire_secs must be greater than 0 when dns.stale_while_revalidate is true");
     }
+    if config.warm_cache.max_hosts == 0 {
+        bail!("dns.warm_cache.max_hosts must be greater than 0");
+    }
+    if config.warm_cache.scan_interval_secs == 0 {
+        bail!("dns.warm_cache.scan_interval_secs must be greater than 0");
+    }
+    if config.warm_cache.refresh_when_ttl_below_secs == 0 {
+        bail!("dns.warm_cache.refresh_when_ttl_below_secs must be greater than 0");
+    }
+    if config.warm_cache.min_hits == 0 {
+        bail!("dns.warm_cache.min_hits must be greater than 0");
+    }
+    if config.warm_cache.active_within_secs == 0 {
+        bail!("dns.warm_cache.active_within_secs must be greater than 0");
+    }
+    if config.warm_cache.min_refresh_interval_secs == 0 {
+        bail!("dns.warm_cache.min_refresh_interval_secs must be greater than 0");
+    }
+    if config.warm_cache.max_consecutive_failures == 0 {
+        bail!("dns.warm_cache.max_consecutive_failures must be greater than 0");
+    }
+    if config.observation.max_hosts_per_scan == 0 {
+        bail!("dns.observation.max_hosts_per_scan must be greater than 0");
+    }
+    if config.observation.min_interval_secs_per_host == 0 {
+        bail!("dns.observation.min_interval_secs_per_host must be greater than 0");
+    }
+    if config.observation.max_profiles_per_host == 0 {
+        bail!("dns.observation.max_profiles_per_host must be greater than 0");
+    }
+    if config.auto_select.min_samples == 0 {
+        bail!("dns.auto_select.min_samples must be greater than 0");
+    }
+    if !(0.0..=1.0).contains(&config.auto_select.min_success_rate) {
+        bail!("dns.auto_select.min_success_rate must be between 0.0 and 1.0");
+    }
+    if config.auto_select.min_health_score > 100 {
+        bail!("dns.auto_select.min_health_score must be between 0 and 100");
+    }
+    if config.auto_select.stickiness_secs == 0 {
+        bail!("dns.auto_select.stickiness_secs must be greater than 0");
+    }
 
     if config.profiles.is_empty() {
         // Keep the existing DNS default behavior: an empty profiles list means the built-in
@@ -1269,13 +1993,42 @@ fn validate_dns_config(config: &DnsConfig) -> Result<()> {
         }
     }
 
+    let system_profile_id = default_dns_profile_id();
     for (index, route) in config.routes.iter().enumerate() {
         let field = format!("dns.routes[{index}]");
         validate_non_empty_id(&format!("{field}.id"), &route.id)?;
         validate_host_pattern(&format!("{field}.host_pattern"), &route.host_pattern)?;
-        if !profile_ids.contains(route.profile_id.trim()) {
+        if !route.strict {
+            bail!("{field}.strict must be true");
+        }
+        let route_profile_id = route.profile_id.trim();
+        if route_profile_id.eq_ignore_ascii_case("auto")
+            || route_profile_id.eq_ignore_ascii_case(system_profile_id.as_str())
+        {
+            bail!(
+                "{field}.profile_id `{}` must reference an explicit DNS server profile",
+                route.profile_id
+            );
+        }
+        if !profile_ids.contains(route_profile_id) {
             bail!(
                 "{field}.profile_id `{}` does not exist in dns.profiles",
+                route.profile_id
+            );
+        }
+        let Some(profile) = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id.trim() == route_profile_id)
+        else {
+            bail!(
+                "{field}.profile_id `{}` does not exist in dns.profiles",
+                route.profile_id
+            );
+        };
+        if !profile.enabled || profile.mode != DnsProfileMode::Udp || profile.servers.is_empty() {
+            bail!(
+                "{field}.profile_id `{}` must reference an enabled UDP DNS server profile",
                 route.profile_id
             );
         }
@@ -1363,6 +2116,65 @@ fn validate_rules(rules: &[RuleConfig], upstreams: Option<&[UpstreamConfig]>) ->
     Ok(())
 }
 
+fn is_gateway_mount_yaml_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(GATEWAY_MOUNT_FILE_EXTENSION))
+}
+
+fn gateway_mount_id_from_file_path(path: &Path) -> Result<String> {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "gateway mount file has no valid UTF-8 file stem: {}",
+                path.display()
+            )
+        })?;
+    validate_gateway_mount_id(stem)?;
+    Ok(stem.to_string())
+}
+
+fn gateway_mount_file_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.{GATEWAY_MOUNT_FILE_EXTENSION}"))
+}
+
+pub fn gateway_mount_path_from_id(id: &str) -> String {
+    format!("/{id}/")
+}
+
+pub fn gateway_mount_id_from_user_input(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("gateway mount id must not be empty");
+    }
+    if trimmed.contains("://") || trimmed.contains('?') || trimmed.contains('#') {
+        bail!("gateway mount id must be one path segment such as site");
+    }
+
+    let id = trimmed.trim_matches('/');
+    if id.is_empty() || id.contains('/') {
+        bail!("gateway mount id must be one segment such as site");
+    }
+    validate_gateway_mount_id(id)?;
+    Ok(id.to_string())
+}
+
+fn validate_gateway_mount_id(value: &str) -> Result<()> {
+    validate_non_empty_id("gateway mount id", value)?;
+    if value == "." || value == ".." {
+        bail!("gateway mount id `{value}` is reserved");
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+    {
+        bail!("gateway mount id `{value}` may only contain ASCII letters, digits, `_`, or `-`");
+    }
+    Ok(())
+}
+
 fn validate_gateway_mounts(
     mounts: &[MountSiteConfig],
     upstreams: Option<&[UpstreamConfig]>,
@@ -1378,12 +2190,22 @@ fn validate_gateway_mounts(
 
     for (index, mount) in mounts.iter().enumerate() {
         let field = format!("gateway.mounts[{index}]");
-        validate_non_empty_id(&format!("{field}.id"), &mount.id)?;
+        validate_gateway_mount_id(&mount.id)
+            .with_context(|| format!("invalid {field}.id `{}`", mount.id))?;
         if !mount_ids.insert(mount.id.clone()) {
             bail!("{field}.id `{}` is duplicated", mount.id);
         }
 
         let mount_path = validate_mount_path(&format!("{field}.mount_path"), &mount.mount_path)?;
+        let expected_mount_path = gateway_mount_path_from_id(&mount.id);
+        if mount_path != expected_mount_path {
+            bail!(
+                "{field}.mount_path `{}` must match gateway mount id `{}` as `{}`",
+                mount.mount_path,
+                mount.id,
+                expected_mount_path
+            );
+        }
         for (existing_path, existing_index) in &normalized_paths {
             if paths_overlap(existing_path, &mount_path) {
                 bail!(
@@ -1496,7 +2318,34 @@ fn required_option<'a>(field: &str, value: Option<&'a str>) -> Result<&'a str> {
 }
 
 fn default_proxy_listen() -> String {
-    "127.0.0.1:8787".to_string()
+    format!("{}:{}", default_listen_host(), default_listen_port())
+}
+
+fn default_listen_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+const fn default_listen_port() -> u16 {
+    8787
+}
+
+const fn default_dns_server_listen_port() -> u16 {
+    53
+}
+
+fn format_listen_address(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+fn split_listen_address(value: &str) -> Result<(String, u16)> {
+    let addr: SocketAddr = value
+        .parse()
+        .with_context(|| format!("invalid listen address: {value}"))?;
+    Ok((addr.ip().to_string(), addr.port()))
 }
 
 fn default_locale() -> String {
@@ -1505,6 +2354,10 @@ fn default_locale() -> String {
 
 fn is_default_locale(value: &str) -> bool {
     value == "en-US"
+}
+
+const fn default_adblock_mode_setting() -> AdblockModeSetting {
+    AdblockModeSetting::Aggressive
 }
 
 const fn is_default_adblock_mode_setting(value: &AdblockModeSetting) -> bool {
@@ -1621,6 +2474,62 @@ const fn default_dns_stale_fallback_secs() -> u64 {
     86400
 }
 
+const fn default_dns_warm_cache_max_hosts() -> usize {
+    8
+}
+
+const fn default_dns_warm_cache_scan_interval_secs() -> u64 {
+    300
+}
+
+const fn default_dns_warm_cache_refresh_when_ttl_below_secs() -> u64 {
+    60
+}
+
+const fn default_dns_warm_cache_min_hits() -> u64 {
+    1
+}
+
+const fn default_dns_warm_cache_active_within_secs() -> u64 {
+    900
+}
+
+const fn default_dns_warm_cache_min_refresh_interval_secs() -> u64 {
+    300
+}
+
+const fn default_dns_warm_cache_max_failures() -> u32 {
+    3
+}
+
+const fn default_dns_observation_max_hosts_per_scan() -> usize {
+    2
+}
+
+const fn default_dns_observation_min_interval_secs_per_host() -> u64 {
+    1800
+}
+
+const fn default_dns_observation_max_profiles_per_host() -> usize {
+    3
+}
+
+const fn default_dns_auto_select_min_samples() -> u64 {
+    5
+}
+
+const fn default_dns_auto_select_min_success_rate() -> f64 {
+    0.8
+}
+
+const fn default_dns_auto_select_min_health_score() -> u8 {
+    75
+}
+
+const fn default_dns_auto_select_stickiness_secs() -> u64 {
+    300
+}
+
 const fn default_traffic_max_queue_per_host() -> usize {
     32
 }
@@ -1659,6 +2568,56 @@ const fn default_traffic_auto_relax_after_successes() -> u64 {
 
 const fn default_traffic_internal_retry_limit() -> usize {
     2
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+    }
+
+    let tmp_path = path.with_extension(format!(
+        "{}.tmp",
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("tmp")
+    ));
+    {
+        let mut file = fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to create temporary file: {}", tmp_path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write temporary file: {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush temporary file: {}", tmp_path.display()))?;
+    }
+
+    replace_file(&tmp_path, path)
+}
+
+#[cfg(unix)]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to)
+        .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))
+}
+
+#[cfg(windows)]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    if to.exists() {
+        fs::remove_file(to)
+            .with_context(|| format!("failed to remove old file: {}", to.display()))?;
+    }
+    fs::rename(from, to)
+        .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    if to.exists() {
+        fs::remove_file(to)
+            .with_context(|| format!("failed to remove old file: {}", to.display()))?;
+    }
+    fs::rename(from, to)
+        .with_context(|| format!("failed to rename {} to {}", from.display(), to.display()))
 }
 
 fn candidate_base_dirs() -> Result<Vec<PathBuf>> {
@@ -1758,42 +2717,236 @@ mod tests {
     }
 
     #[test]
-    fn legacy_nested_adblock_mode_is_still_migrated_when_top_level_is_absent() {
-        let mut config: RelayGateConfig = serde_yaml::from_str(
-            r#"listen: 127.0.0.1:8787
-proxy:
-  adblock:
-    enabled: true
-    mode: standard
-"#,
-        )
-        .expect("legacy nested adblock YAML should deserialize");
-
+    fn settings_store_roundtrip_preserves_user_settings() {
+        let mut config = RelayGateConfig {
+            listen: "127.0.0.1:18888".to_string(),
+            locale: "zh-TW".to_string(),
+            adblock_mode: AdblockModeSetting::Standard,
+            upstream_protocol: UpstreamProtocolPreferenceConfig::Http2Preferred,
+            downstream_protocol: DownstreamProtocolPreferenceConfig::Http1Only,
+            disable_mitm_fast_path: true,
+            ..RelayGateConfig::default()
+        };
         config.apply_fixed_product_defaults();
 
-        assert_eq!(config.adblock_mode, AdblockModeSetting::Standard);
+        let store = RelayGateSettingsStore::from_config(&config);
+        let yaml = serde_yaml::to_string(&store).expect("settings store should serialize");
+        let decoded: RelayGateSettingsStore =
+            serde_yaml::from_str(&yaml).expect("settings store should deserialize");
+        let restored = decoded
+            .into_config()
+            .expect("settings store should convert to config");
+
+        assert_eq!(restored.listen, default_proxy_listen());
+        assert_eq!(restored.locale, default_locale());
+        assert_eq!(restored.adblock_mode, AdblockModeSetting::Standard);
         assert_eq!(
-            config.proxy.adblock.effective_mode(),
+            restored.proxy.adblock.effective_mode(),
             Some(AdblockMode::Standard)
+        );
+        assert_eq!(
+            restored.upstream_protocol,
+            UpstreamProtocolPreferenceConfig::Http2Preferred
+        );
+        assert_eq!(
+            restored.downstream_protocol,
+            DownstreamProtocolPreferenceConfig::Http1Only
+        );
+        assert!(!restored.disable_mitm_fast_path);
+        assert!(restored.gateway.mounts.is_empty());
+    }
+
+    #[test]
+    fn root_config_deserialize_to_listen_and_locale() {
+        let root: RelayGateRootConfig = serde_yaml::from_str(
+            r#"listen:
+  host: 127.0.0.1
+  port: 8787
+locale: zh-TW
+"#,
+        )
+        .expect("minimal root config YAML should deserialize");
+        let mut config = RelayGateConfig::default();
+        root.apply_to_config(&mut config);
+        config.apply_fixed_product_defaults();
+
+        assert_eq!(config.listen, "127.0.0.1:8787");
+        assert_eq!(config.locale, "zh-TW");
+        assert_eq!(config.proxy.listen, "127.0.0.1:8787");
+        assert!(!config.dns_server.enabled);
+        assert_eq!(config.dns_server.host, None);
+        assert_eq!(config.dns_server.port, 53);
+        assert_eq!(
+            config.dns_server.listen_address(&config.listen),
+            "127.0.0.1:53"
         );
     }
 
     #[test]
-    fn missing_protocol_fields_deserialize_to_product_defaults() {
-        let mut config: RelayGateConfig = serde_yaml::from_str("listen: 127.0.0.1:8787\n")
-            .expect("minimal RelayGate YAML should deserialize");
-
+    fn root_config_dns_server_defaults_to_disabled_with_listen_host_and_port_53() {
+        let root: RelayGateRootConfig = serde_yaml::from_str(
+            r#"listen:
+  host: 127.0.0.2
+  port: 8788
+locale: en-US
+"#,
+        )
+        .expect("root config without dns_server should deserialize");
+        let mut config = RelayGateConfig::default();
+        root.apply_to_config(&mut config);
         config.apply_fixed_product_defaults();
 
+        assert!(!config.dns_server.enabled);
+        assert_eq!(config.dns_server.host, None);
+        assert_eq!(config.dns_server.port, 53);
         assert_eq!(
-            config.upstream_protocol,
-            UpstreamProtocolPreferenceConfig::GuardedH3
+            config.dns_server.effective_host(&config.listen),
+            "127.0.0.2"
         );
         assert_eq!(
-            config.downstream_protocol,
-            DownstreamProtocolPreferenceConfig::Http2Enabled
+            config.dns_server.listen_address(&config.listen),
+            "127.0.0.2:53"
         );
-        assert!(config.proxy.upstream.http3_buffered_response_enabled);
-        assert!(config.proxy.mitm.downstream_http2);
+    }
+
+    #[test]
+    fn root_config_dns_server_override_is_preserved() {
+        let root: RelayGateRootConfig = serde_yaml::from_str(
+            r#"listen:
+  host: 127.0.0.1
+  port: 8787
+dns_server:
+  enabled: false
+  host: 127.0.0.2
+  port: 1052
+locale: zh-TW
+"#,
+        )
+        .expect("root config with dns_server override should deserialize");
+        let mut config = RelayGateConfig::default();
+        root.apply_to_config(&mut config);
+        config.apply_fixed_product_defaults();
+
+        assert!(!config.dns_server.enabled);
+        assert_eq!(config.dns_server.host.as_deref(), Some("127.0.0.2"));
+        assert_eq!(config.dns_server.port, 1052);
+        assert_eq!(
+            config.dns_server.listen_address(&config.listen),
+            "127.0.0.2:1052"
+        );
+    }
+
+    #[test]
+    fn root_config_dns_server_explicit_enable_is_preserved() {
+        let root: RelayGateRootConfig = serde_yaml::from_str(
+            r#"listen:
+  host: 127.0.0.1
+  port: 8787
+dns_server:
+  enabled: true
+locale: zh-TW
+"#,
+        )
+        .expect("root config with enabled dns_server should deserialize");
+        let mut config = RelayGateConfig::default();
+        root.apply_to_config(&mut config);
+        config.apply_fixed_product_defaults();
+
+        assert!(config.dns_server.enabled);
+        assert_eq!(config.dns_server.host, None);
+        assert_eq!(config.dns_server.port, 53);
+        assert_eq!(
+            config.dns_server.listen_address(&config.listen),
+            "127.0.0.1:53"
+        );
+    }
+
+    #[test]
+    fn root_config_omits_default_disabled_dns_server_when_serialized() {
+        let root = RelayGateRootConfig::from_config(&RelayGateConfig::default());
+        let yaml = serde_yaml::to_string(&root).expect("root config should serialize");
+
+        assert!(!yaml.contains("dns_server:"));
+    }
+
+    fn dns_test_udp_profile(id: &str) -> DnsProfileConfig {
+        DnsProfileConfig {
+            id: id.to_string(),
+            mode: DnsProfileMode::Udp,
+            servers: vec!["1.1.1.1:53".to_string()],
+            enabled: true,
+            timeout_ms: default_dns_timeout_ms(),
+            attempts: default_dns_attempts(),
+            cache_ttl_min_secs: default_dns_cache_ttl_min_secs(),
+            cache_ttl_max_secs: default_dns_cache_ttl_max_secs(),
+            negative_ttl_secs: default_dns_negative_ttl_secs(),
+            stale_fallback_secs: default_dns_stale_fallback_secs(),
+            fallback_profiles: Vec::new(),
+        }
+    }
+
+    fn dns_test_config_with_route(
+        route: DnsRouteConfig,
+        extra_profiles: Vec<DnsProfileConfig>,
+    ) -> DnsConfig {
+        let mut profiles = vec![DnsProfileConfig::system(), dns_test_udp_profile("primary")];
+        profiles.extend(extra_profiles);
+        DnsConfig {
+            profiles,
+            routes: vec![route],
+            ..DnsConfig::default()
+        }
+    }
+
+    fn dns_test_route(profile_id: &str) -> DnsRouteConfig {
+        DnsRouteConfig {
+            id: "route-example".to_string(),
+            host_pattern: "*.example.com".to_string(),
+            profile_id: profile_id.to_string(),
+            strict: true,
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn dns_route_validation_accepts_explicit_udp_server_profile() {
+        let config = dns_test_config_with_route(dns_test_route("primary"), Vec::new());
+
+        config
+            .validate()
+            .expect("explicit UDP route target should be valid");
+    }
+
+    #[test]
+    fn dns_route_validation_requires_strict_true() {
+        let mut route = dns_test_route("primary");
+        route.strict = false;
+        let config = dns_test_config_with_route(route, Vec::new());
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn dns_route_validation_rejects_system_target() {
+        let config = dns_test_config_with_route(dns_test_route("system"), Vec::new());
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn dns_route_validation_rejects_auto_target() {
+        let config =
+            dns_test_config_with_route(dns_test_route("auto"), vec![dns_test_udp_profile("auto")]);
+
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn dns_route_validation_rejects_disabled_udp_profile_target() {
+        let mut disabled = dns_test_udp_profile("disabled");
+        disabled.enabled = false;
+        let config = dns_test_config_with_route(dns_test_route("disabled"), vec![disabled]);
+
+        assert!(config.validate().is_err());
     }
 }

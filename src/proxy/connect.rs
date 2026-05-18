@@ -18,7 +18,7 @@ use crate::{
     dns::SharedDnsResolver,
     proxy::{
         downstream_status,
-        happy_eyeballs::connect_happy_eyeballs,
+        happy_eyeballs::{connect_happy_eyeballs, resolve_target_addresses},
         http_parse::{parse_http_response_head, read_http_response_head, ParsedHttpRequest},
         mitm::MitmEngine,
         mitm_ca::normalize_authority,
@@ -205,6 +205,7 @@ pub(crate) async fn handle_connect_tunnel(
             upstream_id.as_deref(),
             &connect_target,
             &target_addrs,
+            &state.dns_resolver,
         ),
     )
     .await
@@ -277,19 +278,34 @@ async fn connect_target_stream(
     upstream_id: Option<&str>,
     connect_target: &str,
     direct_target_addrs: &[SocketAddr],
+    dns_resolver: &SharedDnsResolver,
 ) -> Result<TcpStream> {
     let addresses = if upstream_id.is_some() {
-        tokio::net::lookup_host(connect_target)
+        resolve_target_addresses(connect_target, dns_resolver, true)
             .await
             .with_context(|| format!("failed to resolve upstream proxy `{connect_target}`"))?
-            .collect::<Vec<_>>()
     } else {
         direct_target_addrs.to_vec()
     };
 
-    let connection = connect_happy_eyeballs(authority, addresses, CONNECT_HAPPY_EYEBALLS_DELAY)
-        .await
-        .with_context(|| format!("failed to connect CONNECT authority `{authority}`"))?;
+    let result =
+        connect_happy_eyeballs(authority, addresses.clone(), CONNECT_HAPPY_EYEBALLS_DELAY).await;
+    if upstream_id.is_none() {
+        let (host, _) = normalize_authority(authority)?;
+        match &result {
+            Ok(connection) => {
+                dns_resolver.record_origin_connect_attempt(
+                    &host,
+                    &connection.failed_addrs,
+                    Some(connection.selected_addr.ip()),
+                    Some(connection.connect_ms()),
+                );
+            }
+            Err(_) => dns_resolver.record_origin_connect_attempt(&host, &addresses, None, None),
+        }
+    }
+    let connection =
+        result.with_context(|| format!("failed to connect CONNECT authority `{authority}`"))?;
 
     debug!(
         authority = authority,
@@ -301,7 +317,6 @@ async fn connect_target_stream(
         request_type = if upstream_id.is_some() { "connect_upstream_proxy" } else { "connect_direct" },
         "Happy Eyeballs selected CONNECT address"
     );
-
     Ok(connection.stream)
 }
 

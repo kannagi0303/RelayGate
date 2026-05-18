@@ -10,8 +10,8 @@ use crate::{
     config::RelayGateConfig,
     dns::SharedDnsResolver,
     proxy::{
-        protocol_runtime::ProtocolRuntimeConfig, resource_replace::SharedResourceReplaceRegistry,
-        upstream::SharedUpstreamRegistry,
+        gateway_mount::SharedGatewayMountRegistry, protocol_runtime::ProtocolRuntimeConfig,
+        resource_replace::SharedResourceReplaceRegistry, upstream::SharedUpstreamRegistry,
     },
     rewrite::SharedRewriteRegistry,
     runtime::AppRuntime,
@@ -22,14 +22,16 @@ use crate::{
 
 #[derive(Clone)]
 pub(crate) struct WebAppState {
-    // The control panel should use in-memory state instead of re-reading YAML at high frequency.
+    // The control panel should use in-memory state instead of re-reading config files at high frequency.
     pub(crate) config: Arc<RwLock<RelayGateConfig>>,
-    pub(crate) config_path: Arc<std::path::PathBuf>,
+    pub(crate) settings_store_path: Arc<std::path::PathBuf>,
+    pub(crate) root_config_path: Arc<std::path::PathBuf>,
     pub(crate) rewrite_registry: SharedRewriteRegistry,
     pub(crate) resource_replace_registry: SharedResourceReplaceRegistry,
     pub(crate) adblock_state: SharedAdblockState,
     pub(crate) traffic_state: SharedTrafficState,
     pub(crate) upstreams: SharedUpstreamRegistry,
+    pub(crate) gateway_mounts: SharedGatewayMountRegistry,
     pub(crate) dns_resolver: SharedDnsResolver,
     pub(crate) user_script_registry: SharedUserScriptRegistry,
     pub(crate) protocol_runtime: ProtocolRuntimeConfig,
@@ -43,6 +45,7 @@ pub(crate) fn build_state(
     adblock_state: SharedAdblockState,
     traffic_state: SharedTrafficState,
     upstreams: SharedUpstreamRegistry,
+    gateway_mounts: SharedGatewayMountRegistry,
     dns_resolver: SharedDnsResolver,
     user_script_registry: SharedUserScriptRegistry,
     protocol_runtime: ProtocolRuntimeConfig,
@@ -50,8 +53,12 @@ pub(crate) fn build_state(
 ) -> WebAppState {
     WebAppState {
         config: Arc::new(RwLock::new(config.as_ref().clone())),
-        config_path: Arc::new(
-            RelayGateConfig::default_path()
+        settings_store_path: Arc::new(
+            RelayGateConfig::settings_store_path()
+                .unwrap_or_else(|_| std::path::PathBuf::from("data/user/settings.yaml")),
+        ),
+        root_config_path: Arc::new(
+            RelayGateConfig::root_config_path()
                 .unwrap_or_else(|_| std::path::PathBuf::from("relaygate.yaml")),
         ),
         rewrite_registry,
@@ -59,6 +66,7 @@ pub(crate) fn build_state(
         adblock_state,
         traffic_state,
         upstreams,
+        gateway_mounts,
         dns_resolver,
         user_script_registry,
         protocol_runtime,
@@ -75,6 +83,7 @@ pub(crate) fn build_app(state: WebAppState) -> Router {
         .route("/upstream-routes", get(ui_assets::ui_index))
         .route("/dns", get(ui_assets::ui_index))
         .route("/traffic", get(ui_assets::ui_index))
+        .route("/connection-info", get(ui_assets::ui_index))
         .route("/patch", get(ui_assets::ui_index))
         .route("/render", get(ui_assets::ui_index))
         .route("/resource-replace", get(ui_assets::ui_index))
@@ -83,6 +92,12 @@ pub(crate) fn build_app(state: WebAppState) -> Router {
         .route("/favicon.ico", get(ui_assets::favicon))
         .route("/ui-assets/{*path}", get(ui_assets::ui_asset))
         .route("/backend/i18n", get(routes::i18n_payload))
+        .route("/backend/snapshot", get(routes::backend_snapshot))
+        .route(
+            "/backend/connection-info",
+            get(routes::connection_info_snapshot),
+        )
+        .route("/backend/mitm-status", get(routes::mitm_status))
         .route("/backend/events", get(routes::backend_events))
         .route("/backend/actions/reload-rules", post(routes::reload_rules))
         .route(
@@ -96,18 +111,6 @@ pub(crate) fn build_app(state: WebAppState) -> Router {
         .route(
             "/backend/actions/reload-config",
             post(routes::reload_config),
-        )
-        .route(
-            "/backend/actions/update-adblock-lists",
-            post(routes::update_adblock_lists),
-        )
-        .route(
-            "/backend/actions/reload-adblock-rules",
-            post(routes::reload_adblock_rules),
-        )
-        .route(
-            "/backend/actions/open-adblock-rules-folder",
-            post(routes::open_adblock_rules_folder),
         )
         .route("/backend/actions/create-ca", post(routes::create_ca))
         .route(
@@ -175,6 +178,10 @@ pub(crate) fn build_app(state: WebAppState) -> Router {
         .route(
             "/backend/actions/dns-routes/delete",
             post(routes::delete_dns_route),
+        )
+        .route(
+            "/backend/actions/dns-features/toggle",
+            post(routes::toggle_dns_feature),
         )
         .route(
             "/backend/actions/gateway/add",

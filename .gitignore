@@ -8,19 +8,12 @@
 # Local runtime data and sensitive files.
 /logs/
 /mitm/
-/data/logs/
-/data/mitm/
 /relaygate.yaml
-/data/adblock/
-/data/rewrite/
-/data/traffic/
-/data/resource_replace/
-/data/user_script/
-/data/upstreams.yaml
-/data/dns.yaml
-/data/dns/
-/data/patch/*
-!/data/patch/youtube.yaml
+/data/user/
+/data/state/
+
+# Deprecated pre-layout data paths are intentionally not ignored.
+# If they reappear, Git should surface them during review.
 
 # Local release artifacts.
 /*.zip

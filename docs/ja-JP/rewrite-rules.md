@@ -19,14 +19,15 @@ Rules can be used for:
 
 Runtime rewrite data は local private data です。
 
-Typical runtime folders:
+Typical user rule folders:
 
 ```text
-data/rewrite/
-data/resource_replace/
+data/user/rewrite/
+data/user/patch/
+data/user/resource_replace/
 ```
 
-public example として意図していない private rule files は公開しないでください。
+意図して共有する場合を除き、private rule files は公開しないでください。
 
 ## HTTPS Sites
 

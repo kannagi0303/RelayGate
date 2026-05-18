@@ -3,11 +3,15 @@ mod metadata;
 mod model;
 mod paths;
 mod registry;
+mod store;
+mod watcher;
 mod wrapper;
 
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
+
+use crate::runtime::AppRuntime;
 
 pub use model::{UserScriptListItem, UserScriptMetadata, UserScriptStatus};
 pub use paths::script_dir;
@@ -17,6 +21,13 @@ pub type SharedUserScriptRegistry = Arc<RwLock<UserScriptRegistry>>;
 
 pub fn shared_default() -> Result<SharedUserScriptRegistry> {
     Ok(Arc::new(RwLock::new(UserScriptRegistry::load_default()?)))
+}
+
+pub(crate) fn start_auto_reload_watcher(
+    registry: SharedUserScriptRegistry,
+    runtime: AppRuntime,
+) -> Result<watcher::UserScriptWatcher> {
+    watcher::start_auto_reload_watcher(registry, runtime)
 }
 
 pub fn reload_shared_registry(registry: &SharedUserScriptRegistry) -> Result<usize> {
@@ -43,15 +54,17 @@ pub fn list_items(registry: &SharedUserScriptRegistry) -> Vec<UserScriptListItem
         .unwrap_or_default()
 }
 
-pub fn render_document_injection(
+pub async fn render_document_injection(
     registry: &SharedUserScriptRegistry,
     target_url: &str,
     is_frame: Option<bool>,
 ) -> Option<String> {
-    registry
+    let entries = registry
         .read()
         .ok()
-        .and_then(|guard| guard.render_document_injection(target_url, is_frame))
+        .map(|guard| guard.matching_entries(target_url, is_frame))
+        .unwrap_or_default();
+    registry::render_matching_entries(entries).await
 }
 
 pub fn has_enabled_scripts(registry: &SharedUserScriptRegistry) -> bool {

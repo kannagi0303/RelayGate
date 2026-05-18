@@ -1,79 +1,127 @@
 # Configuration Guide
 
-RelayGate uses local configuration files.
+RelayGate uses a small root config plus user-owned settings files.
 
-## Main Config
+## Root Config
 
-Main config file:
+Startup-level settings live in the root file:
 
 ```text
 relaygate.yaml
 ```
 
-Public example:
+Current root config fields:
+
+- `listen.host`
+- `listen.port`
+- `dns_server.enabled`
+- `dns_server.host`
+- `dns_server.port`
+- `locale`
+
+Defaults:
 
 ```text
-relaygate.example.yaml
+listen.host = 127.0.0.1
+listen.port = 8787
+locale = en-US
+
+dns_server.enabled = false
+dns_server.host = inherit listen.host
+dns_server.port = 53
 ```
 
-Common settings include:
+`dns_server` can be omitted. Omitted DNS Server config means the port `53` listener is disabled. Set `dns_server.enabled = true` explicitly when you want RelayGate to act as a local DNS Server.
 
-- proxy listen address
-- web control panel listen address
-- HTTPS MITM settings
+## User Settings Store
+
+User-owned settings live under:
+
+```text
+data/user/settings.yaml
+```
+
+This store can include:
+
 - adblock mode
 - upstream protocol preference
 - downstream protocol preference
-- traffic scheduling settings
-- gateway mounts
+- upstream proxy profiles and routes
+- DNS servers and DNS routes
 - local rules
 
 ## DNS Config
 
-Public example:
+DNS user intent is stored inside:
 
 ```text
-data/dns.example.yaml
+data/user/settings.yaml > dns
 ```
 
-Runtime file:
+The user-facing DNS section stores DNS servers and host routes.
+
+DNS routes are strict internally. A DNS route must point to an explicit UDP DNS server profile. Route targets cannot be `system` or `auto`.
+
+The built-in `system` DNS profile can still be used by RelayGate proxy/internal resolution where it is safe. DNS Server ingress does not use System DNS as an upstream.
+
+## DNS State
+
+RelayGate-generated DNS state lives in:
 
 ```text
-data/dns.yaml
+data/state/dns.bin
 ```
 
-DNS config can include:
+This binary state file stores:
 
-- DNS profiles
-- UDP DNS servers
-- system DNS profile
-- fallback profiles
-- host-based DNS routes
-- strict route behavior
+- DNS cache snapshot
+- learned DNS health information
 
-## Upstream Proxy Config
+DNS auto-select runtime choice is kept in memory. It is not a user setting.
 
-Public example:
+RelayGate also keeps TCP origin connection health under:
 
 ```text
-data/upstreams.example.yaml
+data/state/origin_connect_health.bin
 ```
 
-Runtime file:
+This file is a low-frequency lazy snapshot of observed IPv4 / IPv6 connection health. It helps RelayGate avoid a completely cold start after restart. It is RelayGate-generated state and can be deleted if needed.
+
+## User Script Data
+
+User Script source files live in:
 
 ```text
-data/upstreams.yaml
+data/user/user_script/*.user.js
 ```
 
-Upstream config can include:
+RelayGate-generated User Script metadata and enable state live in:
 
-- upstream proxy profiles
-- host pattern routes
-- enable or disable flags
+```text
+data/state/user_script.bin
+```
 
-## Local Runtime Files
+`data/user/settings.yaml` should not contain a `user_script` section.
 
-Runtime files are private local data.
+## User-Owned Data
+
+User-owned data and user intent live under:
+
+```text
+data/user/
+```
+
+This can include settings, rewrite rules, patch rules, resource replacement rules, User Script source files, and user adblock settings.
+
+## RelayGate State
+
+RelayGate-generated persistent state lives under:
+
+```text
+data/state/
+```
+
+This can include DNS state, downloaded adblock data, matcher cache, diagnostics, learned state, and HTTPS MITM CA files.
 
 Do not publish runtime configs, logs, local CA files, or private rules.
 

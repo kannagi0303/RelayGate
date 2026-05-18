@@ -15,11 +15,11 @@ use crate::{
         mitm_upstream::{MitmUpstreamProtocolPolicy, MitmUpstreamRequestIntent},
         mount_forward::remove_mutated_body_metadata_headers,
         pipeline::PipelineRoute,
-        resource_replace::SharedResourceReplaceRegistry,
+        resource_replace::{ResourceReplacement, SharedResourceReplaceRegistry},
         rules::{RuleEffect, RuleEngine, RuleRequestContext},
         upstream::SharedUpstreamRegistry,
     },
-    rewrite::SharedRewriteRegistry,
+    rewrite::{apply_matching_rule_shared, SharedRewriteRegistry},
     traffic::SharedTrafficState,
     user_script::{self, SharedUserScriptRegistry},
 };
@@ -91,11 +91,17 @@ pub(crate) struct PreparedMitmRequest {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) enum MitmLocalResponseBody {
+    Bytes(Vec<u8>),
+    Resource(ResourceReplacement),
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct MitmLocalResponse {
     pub(crate) status_code: u16,
     pub(crate) reason_phrase: &'static str,
     pub(crate) content_type: String,
-    pub(crate) body: Vec<u8>,
+    pub(crate) body: MitmLocalResponseBody,
 }
 
 impl MitmLocalResponse {
@@ -104,7 +110,7 @@ impl MitmLocalResponse {
             status_code,
             reason_phrase,
             content_type: "text/plain; charset=utf-8".to_string(),
-            body: body.as_bytes().to_vec(),
+            body: MitmLocalResponseBody::Bytes(body.as_bytes().to_vec()),
         }
     }
 
@@ -118,7 +124,16 @@ impl MitmLocalResponse {
             status_code,
             reason_phrase,
             content_type: content_type.into(),
-            body: body.into(),
+            body: MitmLocalResponseBody::Bytes(body.into()),
+        }
+    }
+
+    pub(crate) fn resource(replacement: ResourceReplacement) -> Self {
+        Self {
+            status_code: replacement.status,
+            reason_phrase: status_reason(replacement.status),
+            content_type: replacement.content_type.clone(),
+            body: MitmLocalResponseBody::Resource(replacement),
         }
     }
 }
@@ -172,12 +187,7 @@ pub(crate) fn prepare_mitm_request(
                 "resource replacement matched HTTPS MITM request"
             );
             return Ok(MitmRequestDecision::Respond {
-                response: MitmLocalResponse::with_content_type(
-                    replacement.status,
-                    status_reason(replacement.status),
-                    replacement.content_type,
-                    replacement.body,
-                ),
+                response: MitmLocalResponse::resource(replacement),
                 reason: "resource_replacement",
             });
         }
@@ -363,7 +373,7 @@ pub(crate) fn response_body_pipeline_preflight_reason(
     }
 }
 
-pub(crate) fn process_mitm_response_body(
+pub(crate) async fn process_mitm_response_body(
     state: &MitmResponseState<'_>,
     target_url: &str,
     source_url: &str,
@@ -386,7 +396,8 @@ pub(crate) fn process_mitm_response_body(
         fetch_site,
         response_headers,
         rewritten_response_body,
-    )?;
+    )
+    .await?;
 
     Ok(ProcessedMitmResponseBody { body, rewrite_perf })
 }
@@ -428,7 +439,7 @@ pub(crate) fn allow_active_h3_buffered_for_request(
     body_pipeline_preflight_reason.is_none()
 }
 
-fn apply_site_specific_response_rewrite(
+async fn apply_site_specific_response_rewrite(
     state: &MitmResponseState<'_>,
     target_url: &str,
     source_url: &str,
@@ -466,13 +477,8 @@ fn apply_site_specific_response_rewrite(
     }
 
     let render_started_at = std::time::Instant::now();
-    let render_result = {
-        let registry = state
-            .rewrite_registry
-            .read()
-            .map_err(|_| anyhow::anyhow!("rewrite registry lock poisoned"))?;
-        registry.apply_matching_rule(&response_body, target_url)?
-    };
+    let render_result =
+        apply_matching_rule_shared(state.rewrite_registry, &response_body, target_url).await?;
     perf.render_ms = render_started_at.elapsed().as_millis();
     let csp_directives = adblock::csp_directives_for_request(
         state.adblock_state,
@@ -496,7 +502,8 @@ fn apply_site_specific_response_rewrite(
             } else {
                 Some(false)
             },
-        );
+        )
+        .await;
         let injected = injection.injected();
         (injection.body, injected)
     };

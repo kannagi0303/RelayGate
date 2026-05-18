@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useBackendStore } from "@/stores/backend";
 
@@ -13,6 +13,8 @@ const protocolForm = reactive({
 });
 const protocolSaving = ref(false);
 const protocolSaveQueued = ref(false);
+const caActionBusy = ref(false);
+let mitmRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const caFileText = computed(() => {
   const certOk = mitm.value.ca_cert_exists === true;
@@ -30,12 +32,64 @@ const caTrustText = computed(() => {
 
 const windowsCas = computed(() => mitm.value.windows_relaygate_cas ?? []);
 
+async function refreshMitmStatus() {
+  try {
+    const response = await fetch("/backend/mitm-status", {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) return;
+    const mitmStatus = await response.json();
+    backend.applyBackendPayload({
+      settings: {
+        ...(backend.settings ?? {}),
+        mitm: mitmStatus,
+      },
+    });
+  } catch {
+    // The fast snapshot already provides basic CA file state.
+  }
+}
+
+function scheduleMitmStatusRefresh(delayMs = 900) {
+  if (mitmRefreshTimer) {
+    clearTimeout(mitmRefreshTimer);
+  }
+  mitmRefreshTimer = setTimeout(() => {
+    mitmRefreshTimer = null;
+    void refreshMitmStatus();
+  }, delayMs);
+}
+
+onMounted(() => {
+  void refreshMitmStatus();
+});
+
+onUnmounted(() => {
+  if (mitmRefreshTimer) {
+    clearTimeout(mitmRefreshTimer);
+    mitmRefreshTimer = null;
+  }
+});
+
 function run(endpoint: string) {
   void backend.runAction(endpoint);
 }
 
+async function runCaAction(endpoint: string, fields: Record<string, string> = {}) {
+  caActionBusy.value = true;
+  try {
+    await backend.runAction(endpoint, fields);
+    await backend.refreshSnapshot();
+    await refreshMitmStatus();
+    scheduleMitmStatusRefresh();
+  } finally {
+    caActionBusy.value = false;
+  }
+}
+
 function removeWindowsCa(id: string) {
-  void backend.runAction("/backend/actions/remove-windows-relaygate-ca", { id });
+  void runCaAction("/backend/actions/remove-windows-relaygate-ca", { id });
 }
 
 watch(
@@ -153,10 +207,20 @@ function updateLocale(event: Event) {
         <strong class="mono">{{ mitm.ca_cert_path || t("common.none") }}</strong>
       </div>
       <div class="actions">
-        <button type="button" class="btn" @click="run('/backend/actions/create-ca')">
+        <button
+          type="button"
+          class="btn"
+          :disabled="caActionBusy"
+          @click="runCaAction('/backend/actions/create-ca')"
+        >
           {{ t("ca.trust.install") }}
         </button>
-        <button type="button" class="btn secondary" @click="run('/backend/actions/remove-ca-trust')">
+        <button
+          type="button"
+          class="btn secondary"
+          :disabled="caActionBusy"
+          @click="runCaAction('/backend/actions/remove-ca-trust')"
+        >
           {{ t("ca.trust.remove") }}
         </button>
       </div>
@@ -187,7 +251,12 @@ function updateLocale(event: Event) {
               <td class="mono">{{ item.thumbprint }}</td>
               <td>{{ item.not_after }}</td>
               <td>
-                <button type="button" class="btn small danger" @click="removeWindowsCa(item.id)">
+                <button
+                  type="button"
+                  class="btn small danger"
+                  :disabled="caActionBusy"
+                  @click="removeWindowsCa(item.id)"
+                >
                   {{ t("settings_page.ca.remove_this") }}
                 </button>
               </td>

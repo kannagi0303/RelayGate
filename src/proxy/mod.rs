@@ -9,6 +9,7 @@ pub mod body_classification;
 pub mod connect;
 pub mod control_panel_proxy;
 pub mod downstream_status;
+pub mod gateway_mount;
 pub mod happy_eyeballs;
 pub mod header_hop;
 pub mod http_forward;

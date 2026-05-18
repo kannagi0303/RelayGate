@@ -44,8 +44,9 @@ pub async fn run(mode: AppPathMode) -> Result<()> {
     let (config, used_builtin_defaults) = RelayGateConfig::load_default_or_builtin()?;
     if used_builtin_defaults {
         tracing::warn!(
-            config_path = %RelayGateConfig::default_path()?.display(),
-            "config file not found; using built-in defaults until settings are saved"
+            root_config = %RelayGateConfig::root_config_path()?.display(),
+            settings_store = %RelayGateConfig::settings_store_path()?.display(),
+            "root config and settings store not found; using built-in defaults"
         );
     }
     config.validate()?;
@@ -59,8 +60,11 @@ fn install_rustls_provider() {
 }
 
 fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("relaygate=info,axum=info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "relaygate=info,relaygate::proxy=warn,relaygate::dns=warn,relaygate::traffic=warn,relaygate::body=warn,axum=warn",
+        )
+    });
 
     #[cfg(debug_assertions)]
     {
@@ -73,8 +77,12 @@ fn init_tracing() {
 
     #[cfg(not(debug_assertions))]
     {
-        let log_file = release_log_file()
-            .unwrap_or_else(|_| PathBuf::from("data").join("logs").join("relaygate.log"));
+        let log_file = release_log_file().unwrap_or_else(|_| {
+            PathBuf::from("data")
+                .join("state")
+                .join("diagnostics")
+                .join("relaygate.log")
+        });
         let file_appender = LazyLogFile { path: log_file };
 
         tracing_subscriber::fmt()
@@ -149,7 +157,11 @@ fn release_log_file() -> Result<PathBuf> {
     let base_dir = exe.parent().ok_or_else(|| {
         anyhow::anyhow!("current executable path does not have a parent directory")
     })?;
-    Ok(base_dir.join("data").join("logs").join("relaygate.log"))
+    Ok(base_dir
+        .join("data")
+        .join("state")
+        .join("diagnostics")
+        .join("relaygate.log"))
 }
 
 #[cfg(windows)]
@@ -222,8 +234,8 @@ fn open_control_panel(web_listen: &str, path: &str) -> Result<()> {
 
     #[cfg(not(windows))]
     {
-        std::process::Command::new("xdg-open").arg(&url).spawn()?;
-        Ok(())
+        let _ = url;
+        anyhow::bail!("opening the RelayGate control panel is only supported on Windows")
     }
 }
 

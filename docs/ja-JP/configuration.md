@@ -1,79 +1,127 @@
 # Configuration Guide
 
-RelayGate は local configuration files を使います。
+RelayGate は小さな root config と、user-owned settings files を使います。
 
-## Main Config
+## Root Config
 
-Main config file:
+Startup-level settings は root file に置きます。
 
 ```text
 relaygate.yaml
 ```
 
-Public example:
+Current root config fields:
+
+- `listen.host`
+- `listen.port`
+- `dns_server.enabled`
+- `dns_server.host`
+- `dns_server.port`
+- `locale`
+
+Defaults:
 
 ```text
-relaygate.example.yaml
+listen.host = 127.0.0.1
+listen.port = 8787
+locale = en-US
+
+dns_server.enabled = false
+dns_server.host = inherit listen.host
+dns_server.port = 53
 ```
 
-Common settings:
+`dns_server` は省略できます。省略した場合、port `53` の DNS Server listener は起動しません。RelayGate を local DNS Server として使う場合は、`dns_server.enabled = true` を明示してください。
 
-- proxy listen address
-- web control panel listen address
-- HTTPS MITM settings
+## User Settings Store
+
+User-owned settings は次の場所に置きます。
+
+```text
+data/user/settings.yaml
+```
+
+This store can include:
+
 - adblock mode
 - upstream protocol preference
 - downstream protocol preference
-- traffic scheduling settings
-- gateway mounts
+- upstream proxy profiles and routes
+- DNS servers and DNS routes
 - local rules
 
 ## DNS Config
 
-Public example:
+DNS user intent は次の section に保存されます。
 
 ```text
-data/dns.example.yaml
+data/user/settings.yaml > dns
 ```
 
-Runtime file:
+User-facing DNS section は DNS servers と host routes を保存します。
+
+DNS routes は内部的に常に strict です。DNS route は explicit UDP DNS server profile を指す必要があります。Route target に `system` や `auto` は使えません。
+
+Built-in `system` DNS profile は、安全な RelayGate proxy/internal resolution では使えます。DNS Server ingress は System DNS を upstream として使いません。
+
+## DNS State
+
+RelayGate-generated DNS state は次の場所に置きます。
 
 ```text
-data/dns.yaml
+data/state/dns.bin
 ```
 
-DNS config can include:
+This binary state file stores:
 
-- DNS profiles
-- UDP DNS servers
-- system DNS profile
-- fallback profiles
-- host-based DNS routes
-- strict route behavior
+- DNS cache snapshot
+- learned DNS health information
 
-## Upstream Proxy Config
+DNS auto-select の runtime choice は memory-only です。User setting ではありません。
 
-Public example:
+RelayGate also keeps TCP origin connection health here:
 
 ```text
-data/upstreams.example.yaml
+data/state/origin_connect_health.bin
 ```
 
-Runtime file:
+This is a low-frequency lazy snapshot of observed IPv4 / IPv6 connection health. It helps RelayGate avoid a completely cold start after restart. It is RelayGate-generated state and can be deleted if needed.
+
+## User Script Data
+
+User Script source files は次の場所に置きます。
 
 ```text
-data/upstreams.yaml
+data/user/user_script/*.user.js
 ```
 
-Upstream config can include:
+RelayGate-generated User Script metadata and enable state は次の場所に置きます。
 
-- upstream proxy profiles
-- host pattern routes
-- enable or disable flags
+```text
+data/state/user_script.bin
+```
 
-## Local Runtime Files
+`data/user/settings.yaml` should not contain a `user_script` section.
 
-Runtime files は private local data です。
+## User-Owned Data
+
+User-owned data と user intent は次の場所に置かれます。
+
+```text
+data/user/
+```
+
+Settings、rewrite rules、patch rules、resource replacement rules、User Script source files、user adblock settings などが含まれます。
+
+## RelayGate State
+
+RelayGate が生成する persistent state は次の場所に置かれます。
+
+```text
+data/state/
+```
+
+DNS state、downloaded adblock data、matcher cache、diagnostics、learned state、HTTPS MITM CA files などが含まれます。
 
 runtime configs、logs、local CA files、private rules を公開しないでください。
 

@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     error::Error as _,
     sync::{Mutex, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -284,19 +284,22 @@ pub(crate) fn build_https_response_bytes(
 pub(crate) enum FlushPolicy {
     /// Flush the first body chunk promptly, then allow later chunks to coalesce.
     FirstChunk,
-    /// Flush every body chunk. Use for latency-sensitive segment streams such as .m4s/.ts/SSE.
+    /// Flush every body chunk. Keep this for true live streams such as SSE.
     EveryChunk,
     /// Flush after at least this many pending body bytes.
     PeriodicBytes(usize),
 }
 
 const DEFAULT_MEDIA_FLUSH_BYTES: usize = 128 * 1024;
+const MAX_PERIODIC_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const LOW_LATENCY_RESPONSE_BYTES: u64 = 64 * 1024;
 const LARGE_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 const BALANCED_FLUSH_BYTES: usize = 256 * 1024;
 const THROUGHPUT_FLUSH_BYTES: usize = 1024 * 1024;
 const CONSERVATIVE_FLUSH_BYTES: usize = 64 * 1024;
 const CRITICAL_ASSET_FLUSH_BYTES: usize = 32 * 1024;
+const ADAPTIVE_MIN_SAMPLE_BYTES: usize = 512 * 1024;
+const ADAPTIVE_MIN_SAMPLE_INTERVAL_SECS: u64 = 5;
 const MAX_ADAPTIVE_HOSTS: usize = 512;
 const EWMA_ALPHA: f64 = 0.2;
 
@@ -304,6 +307,7 @@ const EWMA_ALPHA: f64 = 0.2;
 struct HostAdaptiveStats {
     throughput_bytes_per_sec: f64,
     error_score: f64,
+    last_sample_at: Option<Instant>,
 }
 
 #[derive(Debug, Default)]
@@ -342,6 +346,7 @@ pub(crate) async fn stream_https_response(
 
     let mut chunk_index = 0usize;
     let mut pending_flush_bytes = 0usize;
+    let mut pending_flush_started_at = Instant::now();
     let mut response_body_bytes = 0usize;
 
     let completion = if matches!(body_mode, MitmStreamBodyMode::NoBody) {
@@ -363,9 +368,15 @@ pub(crate) async fn stream_https_response(
             }
             response_body_bytes = response_body_bytes.saturating_add(chunk.len());
 
-            if should_flush_after_chunk(flush_policy, chunk_index, pending_flush_bytes) {
+            if should_flush_after_chunk(
+                flush_policy,
+                chunk_index,
+                pending_flush_bytes,
+                pending_flush_started_at.elapsed(),
+            ) {
                 tls_stream.flush().await?;
                 pending_flush_bytes = 0;
+                pending_flush_started_at = Instant::now();
             }
 
             chunk_index += 1;
@@ -445,8 +456,8 @@ pub(crate) fn flush_policy_for_response(
         return FlushPolicy::EveryChunk;
     }
 
-    if is_latency_sensitive_stream(&path, &content_type) {
-        return FlushPolicy::EveryChunk;
+    if is_segment_stream(&path, &content_type) {
+        return FlushPolicy::PeriodicBytes(CONSERVATIVE_FLUSH_BYTES);
     }
 
     if is_playlist_or_manifest(&path, &content_type) {
@@ -485,7 +496,7 @@ fn record_adaptive_stream_success(
     response_body_bytes: usize,
     elapsed: std::time::Duration,
 ) {
-    if response_body_bytes == 0 {
+    if response_body_bytes < ADAPTIVE_MIN_SAMPLE_BYTES {
         return;
     }
     let Some(host) = target_url_host(target_url) else {
@@ -496,12 +507,22 @@ fn record_adaptive_stream_success(
         return;
     }
 
+    let now = Instant::now();
     let bytes_per_sec = response_body_bytes as f64 / elapsed_secs;
     let Ok(mut state) = adaptive_flush_state().lock() else {
         return;
     };
     ensure_adaptive_host_slot(&mut state, &host);
     let stats = state.stats.entry(host).or_default();
+    if stats
+        .last_sample_at
+        .and_then(|last| now.checked_duration_since(last))
+        .is_some_and(|age| age.as_secs() < ADAPTIVE_MIN_SAMPLE_INTERVAL_SECS)
+    {
+        return;
+    }
+
+    stats.last_sample_at = Some(now);
     stats.throughput_bytes_per_sec = if stats.throughput_bytes_per_sec == 0.0 {
         bytes_per_sec
     } else {
@@ -585,6 +606,7 @@ fn should_flush_after_chunk(
     flush_policy: FlushPolicy,
     chunk_index: usize,
     pending_flush_bytes: usize,
+    pending_flush_age: Duration,
 ) -> bool {
     match flush_policy {
         FlushPolicy::FirstChunk => chunk_index == 0,
@@ -597,7 +619,9 @@ fn should_flush_after_chunk(
         // requests. After the first chunk, keep the coalescing threshold for
         // throughput.
         FlushPolicy::PeriodicBytes(threshold) => {
-            chunk_index == 0 || pending_flush_bytes >= threshold
+            chunk_index == 0
+                || pending_flush_bytes >= threshold
+                || pending_flush_age >= MAX_PERIODIC_FLUSH_INTERVAL
         }
     }
 }
@@ -637,9 +661,8 @@ fn is_latency_sensitive_small_response(path: &str, request_type: &str, content_t
         || path.ends_with(".html")
 }
 
-fn is_latency_sensitive_stream(path: &str, content_type: &str) -> bool {
-    is_event_stream(content_type)
-        || path.ends_with(".m4s")
+fn is_segment_stream(path: &str, content_type: &str) -> bool {
+    path.ends_with(".m4s")
         || path.ends_with(".ts")
         || path.ends_with(".cmfv")
         || path.ends_with(".cmfa")
@@ -795,10 +818,6 @@ pub(crate) fn log_response_body(source: &str, url: &str, content_type: Option<&s
     }
 }
 
-pub(crate) fn is_html_content_type(content_type: &str) -> bool {
-    content_type.contains("text/html") || content_type.contains("application/xhtml")
-}
-
 fn parse_header_line(line: &str) -> Result<(String, String)> {
     let (name, value) = line
         .split_once(':')
@@ -909,6 +928,7 @@ fn is_probably_text_content(content_type: Option<&str>) -> bool {
 mod tests {
     use super::*;
     use reqwest::header::HeaderValue;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn headers(content_type: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -920,8 +940,14 @@ mod tests {
         *adaptive_flush_state().lock().unwrap() = AdaptiveFlushState::default();
     }
 
+    fn adaptive_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
     #[test]
     fn adaptive_flush_prefers_low_latency_for_small_text() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         let policy = flush_policy_for_response(
             "https://example.test/api/data.json",
@@ -935,6 +961,7 @@ mod tests {
 
     #[test]
     fn adaptive_flush_prefers_throughput_for_large_body() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         let policy = flush_policy_for_response(
             "https://example.test/download.bin",
@@ -948,6 +975,7 @@ mod tests {
 
     #[test]
     fn adaptive_flush_keeps_event_stream_low_latency() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         let policy = flush_policy_for_response(
             "https://example.test/events",
@@ -960,7 +988,22 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_flush_keeps_media_segments_streaming_without_every_chunk_flush() {
+        let _guard = adaptive_test_guard();
+        reset_adaptive_state();
+        let policy = flush_policy_for_response(
+            "https://video.example.test/chunk-1.m4s",
+            "media",
+            &headers("video/iso.segment"),
+            Some(2 * 1024 * 1024),
+        );
+
+        assert_eq!(policy, FlushPolicy::PeriodicBytes(CONSERVATIVE_FLUSH_BYTES));
+    }
+
+    #[test]
     fn adaptive_flush_increases_large_body_threshold_for_fast_hosts() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         record_adaptive_stream_success(
             "https://fast.example.test/download.bin",
@@ -979,7 +1022,28 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_flush_ignores_tiny_success_samples() {
+        let _guard = adaptive_test_guard();
+        reset_adaptive_state();
+        record_adaptive_stream_success(
+            "https://fast.example.test/small.json",
+            32 * 1024,
+            std::time::Duration::from_millis(10),
+        );
+
+        let policy = flush_policy_for_response(
+            "https://fast.example.test/download.bin",
+            "other",
+            &headers("application/octet-stream"),
+            Some(128 * 1024 * 1024),
+        );
+
+        assert_eq!(policy, FlushPolicy::PeriodicBytes(THROUGHPUT_FLUSH_BYTES));
+    }
+
+    #[test]
     fn adaptive_flush_backs_off_after_stream_errors() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         record_adaptive_stream_failure("https://unstable.example.test/download.bin");
         record_adaptive_stream_failure("https://unstable.example.test/download.bin");
@@ -996,6 +1060,7 @@ mod tests {
 
     #[test]
     fn adaptive_flush_keeps_critical_subresources_conservative() {
+        let _guard = adaptive_test_guard();
         reset_adaptive_state();
         record_adaptive_stream_success(
             "https://fast.example.test/app.js",
@@ -1021,17 +1086,26 @@ mod tests {
         assert!(should_flush_after_chunk(
             FlushPolicy::PeriodicBytes(THROUGHPUT_FLUSH_BYTES),
             0,
-            1024
+            1024,
+            Duration::ZERO
         ));
         assert!(!should_flush_after_chunk(
             FlushPolicy::PeriodicBytes(THROUGHPUT_FLUSH_BYTES),
             1,
-            1024
+            1024,
+            Duration::ZERO
         ));
         assert!(should_flush_after_chunk(
             FlushPolicy::PeriodicBytes(THROUGHPUT_FLUSH_BYTES),
             1,
-            THROUGHPUT_FLUSH_BYTES
+            THROUGHPUT_FLUSH_BYTES,
+            Duration::ZERO
+        ));
+        assert!(should_flush_after_chunk(
+            FlushPolicy::PeriodicBytes(THROUGHPUT_FLUSH_BYTES),
+            1,
+            1024,
+            MAX_PERIODIC_FLUSH_INTERVAL
         ));
     }
 

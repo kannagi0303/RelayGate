@@ -7,24 +7,20 @@ import { dnsProviderName } from "@/lib/dnsProviders";
 
 const backend = useBackendStore();
 const { t } = useI18n();
+const hasDnsPayload = computed(() => backend.dns !== null);
 const payload = computed(() => backend.dns ?? { profiles: [], routes: [], profile_options: [] });
 const profileForm = reactive({ server_ip: "", server_port: "53" });
 const routeForm = reactive({ host_pattern: "", profile_id: "" });
 const helpMarkdown = computed(() => String(t("dns.help.markdown")));
-const profileSummary = computed(() => {
-  const profiles = payload.value.profiles ?? [];
-  const enabled = profiles.filter((item: any) => item.enabled).length;
-  return { enabled, total: profiles.length };
-});
-const routeSummary = computed(() => {
-  const routes = payload.value.routes ?? [];
-  const enabled = routes.filter((item: any) => item.enabled).length;
-  return { enabled, total: routes.length };
-});
-const profileIds = computed(() => (payload.value.profiles ?? []).map((item: any) => String(item.id)));
-const profilesById = computed(() =>
-  new Map((payload.value.profiles ?? []).map((item: any) => [String(item.id), item])),
+const customProfiles = computed(() => (payload.value.profiles ?? []).filter((item: any) => !item.is_system));
+const routeProfileOptions = computed(() =>
+  (payload.value.profiles ?? []).filter((item: any) => item.enabled && !item.is_system && firstServer(item)),
 );
+const serverSummary = computed(() => {
+  const servers = customProfiles.value;
+  const enabled = servers.filter((item: any) => item.enabled).length;
+  return { enabled, total: servers.length };
+});
 
 async function addProfile() {
   const result = await backend.runAction("/backend/actions/dns-profiles/add", profileForm);
@@ -35,32 +31,16 @@ async function addProfile() {
 }
 
 async function addRoute() {
+  if (!routeForm.profile_id && routeProfileOptions.value.length) {
+    routeForm.profile_id = String(routeProfileOptions.value[0].id);
+  }
   const result = await backend.runAction("/backend/actions/dns-routes/add", {
     host_pattern: routeForm.host_pattern,
-    profile_id: routeForm.profile_id || payload.value.profile_options?.[0] || "",
+    profile_id: routeForm.profile_id,
   });
-  if (result.ok) routeForm.host_pattern = "";
-}
-
-function toggleProfile(item: any) {
-  void backend.runAction("/backend/actions/dns-profiles/toggle", {
-    id: item.id,
-    enabled: item.enabled ? "false" : "true",
-  });
-}
-
-function toggleRoute(item: any) {
-  void backend.runAction("/backend/actions/dns-routes/toggle", {
-    id: item.id,
-    enabled: item.enabled ? "false" : "true",
-  });
-}
-
-function moveProfile(item: any, direction: "up" | "down") {
-  void backend.runAction("/backend/actions/dns-profiles/move", {
-    id: item.id,
-    direction,
-  });
+  if (result.ok) {
+    routeForm.host_pattern = "";
+  }
 }
 
 function firstServer(item: any) {
@@ -68,6 +48,7 @@ function firstServer(item: any) {
 }
 
 function serverIp(item: any) {
+  if (item.is_system) return t("common.auto");
   const server = firstServer(item);
   if (!server) return t("common.none");
   if (server.startsWith("[")) {
@@ -77,6 +58,7 @@ function serverIp(item: any) {
 }
 
 function serverPort(item: any) {
+  if (item.is_system) return t("common.auto");
   const server = firstServer(item);
   if (!server) return t("common.none");
   if (server.startsWith("[")) {
@@ -87,31 +69,57 @@ function serverPort(item: any) {
 }
 
 function serviceName(item: any) {
+  if (item.is_system) return "System";
   const ip = serverIp(item);
   if (!ip || ip === t("common.none")) return "";
   return dnsProviderName(ip);
 }
 
-function profileDisplayLabel(item: any) {
+function endpointLabel(item: any) {
   const ip = serverIp(item);
-  const name = serviceName(item);
-  if (name && ip && ip !== t("common.none")) return `${name} (${ip})`;
-  if (ip && ip !== t("common.none")) return ip;
-  return t("common.none");
+  if (!ip || ip === t("common.none")) return t("common.none");
+  if (item.is_system) return t("common.auto");
+  return `${ip}:${serverPort(item)}`;
 }
 
-function routeProfileLabel(profileId: string) {
-  const profile = profilesById.value.get(String(profileId));
-  if (!profile) return t("dns.routes.missing_profile");
-  return profileDisplayLabel(profile);
+function showSingleLineService(item: any) {
+  return !serviceName(item) && !item.is_system;
 }
 
-function canMoveProfile(item: any, direction: "up" | "down") {
-  const index = profileIds.value.indexOf(String(item.id));
-  if (index < 0) return false;
-  if (direction === "up") return index > 0;
-  return index < profileIds.value.length - 1;
+function percent(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return t("common.none");
+  return `${Math.round(number * 100)}%`;
 }
+
+function milliseconds(value: unknown) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return t("common.none");
+  return `${Math.round(number)} ms`;
+}
+
+function dnsRuntimeStatus() {
+  if (!hasDnsPayload.value) return t("common.loading");
+  return payload.value.enabled ? t("common.enabled") : t("common.disabled");
+}
+
+function profileById(id: string) {
+  return (payload.value.profiles ?? []).find((item: any) => item.id === id);
+}
+
+function dnsRouteTargetLabel(item: any) {
+  const endpoint = endpointLabel(item);
+  if (!endpoint || endpoint === t("common.none") || item.is_system) return endpoint;
+  const provider = serviceName(item);
+  return provider ? `${endpoint} (${provider})` : endpoint;
+}
+
+function routeProfileLabel(id: string) {
+  const profile = profileById(id);
+  if (!profile || profile.is_system) return id || t("common.none");
+  return dnsRouteTargetLabel(profile);
+}
+
 </script>
 
 <template>
@@ -126,17 +134,17 @@ function canMoveProfile(item: any, direction: "up" | "down") {
       <div class="summary-list dns-summary-list">
         <div class="summary-item">
           <span>{{ t("dns.status.runtime") }}</span>
-          <strong>{{ payload.enabled ? t("common.enabled") : t("common.disabled") }}</strong>
+          <strong>{{ dnsRuntimeStatus() }}</strong>
         </div>
         <div class="summary-item">
-          <span>{{ t("dns.status.profiles") }}</span>
-          <strong>{{ profileSummary.enabled }} / {{ profileSummary.total }}</strong>
+          <span>{{ t("dns.status.servers") }}</span>
+          <strong>{{ serverSummary.enabled }} / {{ serverSummary.total }}</strong>
           <small>{{ t("dns.status.enabled_total") }}</small>
         </div>
         <div class="summary-item">
-          <span>{{ t("dns.status.routes") }}</span>
-          <strong>{{ routeSummary.enabled }} / {{ routeSummary.total }}</strong>
-          <small>{{ t("dns.status.enabled_total") }}</small>
+          <span>{{ t("dns.status.cache") }}</span>
+          <strong>{{ hasDnsPayload ? payload.cache_entries : t("common.loading") }}</strong>
+          <small>{{ t("status_page.entries") }}</small>
         </div>
       </div>
     </div>
@@ -144,7 +152,7 @@ function canMoveProfile(item: any, direction: "up" | "down") {
     <div class="surface table-surface">
       <div class="table-heading">
         <div>
-          <h2>{{ t("dns.tables.profiles") }}</h2>
+          <h2>{{ t("dns.tables.servers") }}</h2>
         </div>
       </div>
       <form class="table-inline-form profile-add-form" @submit.prevent="addProfile">
@@ -160,48 +168,43 @@ function canMoveProfile(item: any, direction: "up" | "down") {
           <span>{{ t("dns.fields.port") }}</span>
           <input v-model="profileForm.server_port" type="text" placeholder="53" />
         </label>
-        <button type="submit" class="btn">{{ t("dns.actions.add_profile") }}</button>
+        <button type="submit" class="btn">{{ t("dns.actions.add_server") }}</button>
       </form>
       <table>
         <thead>
           <tr>
             <th>{{ t("dns.cols.service") }}</th>
-            <th>{{ t("dns.cols.ip") }}</th>
-            <th>{{ t("dns.cols.port") }}</th>
-            <th>{{ t("dns.cols.status") }}</th>
+            <th>{{ t("dns.cols.latency") }}</th>
+            <th>{{ t("dns.cols.score") }}</th>
+            <th>{{ t("dns.cols.success") }}</th>
             <th>{{ t("dns.cols.action") }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!payload.profiles?.length">
-            <td colspan="5">{{ t("dns.empty.profiles") }}</td>
+            <td colspan="5">{{ t("dns.empty.servers") }}</td>
           </tr>
-          <tr v-for="item in payload.profiles" :key="item.id">
-            <td>{{ serviceName(item) }}</td>
-            <td class="mono">{{ serverIp(item) }}</td>
-            <td class="mono">{{ serverPort(item) }}</td>
-            <td>{{ item.enabled ? t("common.enabled") : t("common.disabled") }}</td>
+          <tr v-for="item in payload.profiles" :key="item.id" :class="{ 'dns-active-row': item.is_active }">
+            <td>
+              <div class="dns-service-cell" :class="{ 'is-active': item.is_active, 'single-line': showSingleLineService(item) }">
+                <template v-if="item.is_system">
+                  <span class="dns-service-title">System</span>
+                  <span class="dns-service-meta">{{ t("common.auto") }}</span>
+                </template>
+                <template v-else-if="showSingleLineService(item)">
+                  <span class="dns-service-title mono">{{ endpointLabel(item) }}</span>
+                </template>
+                <template v-else>
+                  <span class="dns-service-title">{{ serviceName(item) }}</span>
+                  <span class="dns-service-meta mono">{{ endpointLabel(item) }}</span>
+                </template>
+              </div>
+            </td>
+            <td>{{ milliseconds(item.average_latency_ms) }}</td>
+            <td>{{ item.health_score ?? t("common.none") }}</td>
+            <td>{{ percent(item.success_rate) }}</td>
             <td class="actions compact">
-              <button
-                type="button"
-                class="btn table-btn secondary"
-                :disabled="!canMoveProfile(item, 'up')"
-                @click="moveProfile(item, 'up')"
-              >
-                {{ t("common.move_up") }}
-              </button>
-              <button
-                type="button"
-                class="btn table-btn secondary"
-                :disabled="!canMoveProfile(item, 'down')"
-                @click="moveProfile(item, 'down')"
-              >
-                {{ t("common.move_down") }}
-              </button>
-              <button type="button" class="btn table-btn secondary" @click="toggleProfile(item)">
-                {{ item.enabled ? t("common.disable") : t("common.enable") }}
-              </button>
-              <button type="button" class="btn table-btn danger" @click="backend.runAction('/backend/actions/dns-profiles/delete', { id: item.id })">
+              <button v-if="!item.is_system" type="button" class="btn table-btn danger" @click="backend.runAction('/backend/actions/dns-profiles/delete', { id: item.id })">
                 {{ t("common.delete") }}
               </button>
             </td>
@@ -216,20 +219,21 @@ function canMoveProfile(item: any, direction: "up" | "down") {
           <h2>{{ t("dns.tables.routes") }}</h2>
         </div>
       </div>
-      <form class="table-inline-form route-add-form" @submit.prevent="addRoute">
+      <form class="table-inline-form dns-route-add-form" @submit.prevent="addRoute">
         <label>
           <span>{{ t("dns.fields.pattern") }}</span>
           <input
             v-model="routeForm.host_pattern"
             type="text"
-            placeholder="*.example.com"
+            :placeholder="t('dns.placeholders.pattern')"
           />
         </label>
         <label>
-          <span>{{ t("dns.fields.service") }}</span>
+          <span>{{ t("dns.cols.profile") }}</span>
           <select v-model="routeForm.profile_id">
-            <option v-for="id in payload.profile_options" :key="id" :value="id">
-              {{ routeProfileLabel(id) }}
+            <option value="" disabled>{{ t("dns.placeholders.profile") }}</option>
+            <option v-for="item in routeProfileOptions" :key="item.id" :value="item.id">
+              {{ routeProfileLabel(item.id) }}
             </option>
           </select>
         </label>
@@ -239,23 +243,21 @@ function canMoveProfile(item: any, direction: "up" | "down") {
         <thead>
           <tr>
             <th>{{ t("dns.cols.pattern") }}</th>
-            <th>{{ t("dns.cols.service") }}</th>
-            <th>{{ t("dns.cols.status") }}</th>
+            <th>{{ t("dns.cols.profile") }}</th>
             <th>{{ t("dns.cols.action") }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!payload.routes?.length">
-            <td colspan="4">{{ t("dns.empty.routes") }}</td>
+            <td colspan="3">{{ t("dns.empty.routes") }}</td>
           </tr>
           <tr v-for="item in payload.routes" :key="item.id">
             <td class="mono">{{ item.host_pattern }}</td>
-            <td>{{ routeProfileLabel(item.profile_id) }}</td>
-            <td>{{ item.enabled ? t("common.enabled") : t("common.disabled") }}</td>
+            <td>
+              <span :class="{ muted: !item.profile_exists }">{{ routeProfileLabel(item.profile_id) }}</span>
+              <small v-if="!item.profile_exists" class="field-hint warning">{{ t("dns.routes.missing_profile") }}</small>
+            </td>
             <td class="actions compact">
-              <button type="button" class="btn table-btn secondary" @click="toggleRoute(item)">
-                {{ item.enabled ? t("common.disable") : t("common.enable") }}
-              </button>
               <button type="button" class="btn table-btn danger" @click="backend.runAction('/backend/actions/dns-routes/delete', { id: item.id })">
                 {{ t("common.delete") }}
               </button>
@@ -275,3 +277,57 @@ function canMoveProfile(item: any, direction: "up" | "down") {
     </div>
   </section>
 </template>
+
+
+<style scoped>
+.dns-service-cell {
+  display: grid;
+  gap: calc(2 / 16 * 1rem);
+}
+
+.dns-service-cell.single-line {
+  display: block;
+}
+
+.dns-service-title {
+  color: var(--rg-ink);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.dns-service-meta {
+  color: var(--rg-muted);
+  font-size: calc(13 / 16 * 1rem);
+  line-height: 1.35;
+}
+
+.dns-service-cell.is-active .dns-service-title,
+.dns-service-cell.is-active .dns-service-meta {
+  color: var(--rg-accent-strong);
+}
+
+.dns-route-add-form {
+  grid-template-columns: minmax(0, 1.35fr) minmax(calc(220 / 16 * 1rem), 1fr) auto;
+}
+
+.checkbox-inline {
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: calc(8 / 16 * 1rem);
+  padding-bottom: calc(4 / 16 * 1rem);
+}
+
+.checkbox-inline input {
+  margin: 0;
+}
+
+.muted {
+  color: var(--rg-muted);
+}
+
+.field-hint.warning {
+  display: block;
+  color: var(--rg-danger);
+}
+</style>

@@ -584,7 +584,7 @@ impl TrafficState {
     }
 
     async fn persist_loop(self: Arc<Self>, mut persist_rx: watch::Receiver<u64>) {
-        const PERSIST_DEBOUNCE_SECS: u64 = 60;
+        const PERSIST_DEBOUNCE_SECS: u64 = 900;
 
         loop {
             if persist_rx.changed().await.is_err() {
@@ -610,12 +610,17 @@ impl TrafficState {
         }
     }
 
-    fn flush_persisted_state(&self) -> Result<()> {
+    pub fn flush_persisted_state(&self) -> Result<()> {
         let state = self
             .persisted_state
             .lock()
             .map_err(|_| anyhow::anyhow!("traffic persisted state lock poisoned"))?
             .clone();
+
+        if state.hosts.is_empty() && !self.storage.state_path.exists() {
+            return Ok(());
+        }
+
         let yaml = serde_yaml::to_string(&state)?;
         if let Some(parent) = self.storage.state_path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -718,25 +723,39 @@ fn load_state_file(path: &Path) -> Result<TrafficStateFile> {
 }
 
 fn traffic_sites_path() -> Result<PathBuf> {
-    Ok(traffic_base_dir()?.join("sites.yaml"))
+    Ok(traffic_user_dir()?.join("sites.yaml"))
 }
 
 fn traffic_state_path() -> Result<PathBuf> {
-    Ok(traffic_base_dir()?.join("state.yaml"))
+    Ok(traffic_state_dir()?.join("state.yaml"))
+}
+
+fn traffic_user_dir() -> Result<PathBuf> {
+    Ok(traffic_base_dir()?
+        .join("data")
+        .join("user")
+        .join("traffic"))
+}
+
+fn traffic_state_dir() -> Result<PathBuf> {
+    Ok(traffic_base_dir()?
+        .join("data")
+        .join("state")
+        .join("traffic"))
 }
 
 fn traffic_base_dir() -> Result<PathBuf> {
-    let base = match app_path_mode() {
-        AppPathMode::Workspace => PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+    match app_path_mode() {
+        AppPathMode::Workspace => Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
         AppPathMode::Portable => {
             let exe =
                 std::env::current_exe().context("failed to resolve current executable path")?;
-            exe.parent()
+            Ok(exe
+                .parent()
                 .context("current executable path does not have a parent directory")?
-                .to_path_buf()
+                .to_path_buf())
         }
-    };
-    Ok(base.join("data").join("traffic"))
+    }
 }
 
 fn clamp_learned_state(

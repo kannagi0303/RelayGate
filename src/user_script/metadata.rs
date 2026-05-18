@@ -26,6 +26,7 @@ pub(crate) fn parse_metadata_block(block: &str) -> Result<UserScriptMetadata> {
             "match" => metadata.matches.push(value.to_string()),
             "include" => metadata.includes.push(value.to_string()),
             "exclude" => metadata.excludes.push(value.to_string()),
+            "exclude-match" => metadata.exclude_matches.push(value.to_string()),
             "run-at" => metadata.run_at = Some(value.to_string()),
             "grant" => metadata.grants.push(value.to_string()),
             "inject-into" => metadata.inject_into = Some(value.to_string()),

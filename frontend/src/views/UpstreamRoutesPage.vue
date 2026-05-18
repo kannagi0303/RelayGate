@@ -10,7 +10,7 @@ const payload = computed(() => backend.upstreamRoutes ?? { items: [], upstream_o
 const form = reactive({ host_pattern: "", upstream_id: "" });
 const upstreams = computed(() => backend.upstreams?.items ?? []);
 const upstreamsById = computed(() =>
-  new Map(upstreams.value.map((item: any) => [String(item.id), item])),
+  new Map<string, any>(upstreams.value.map((item: any) => [String(item.id), item])),
 );
 const summary = computed(() => {
   const items = payload.value.items ?? [];

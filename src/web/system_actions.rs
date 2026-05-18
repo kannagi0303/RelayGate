@@ -1,10 +1,7 @@
-use std::{path::PathBuf, process::Command};
+use std::path::PathBuf;
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-#[cfg(windows)]
-use serde::Deserialize;
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
 use crate::{
     config::RelayGateConfig,
@@ -13,13 +10,8 @@ use crate::{
     web::backend_payloads::{MitmStatusPayload, WindowsRelayGateCaPayload},
 };
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
 pub(crate) fn build_mitm_status(config: &RelayGateConfig) -> MitmStatusPayload {
-    let storage_dir = mitm_storage_dir();
-    let cert_path = storage_dir.join("relaygate-ca-cert.pem");
-    let key_path = storage_dir.join("relaygate-ca-key.pem");
+    let (cert_path, key_path) = mitm_paths();
 
     MitmStatusPayload {
         enabled: config.proxy.mitm.enabled,
@@ -27,9 +19,31 @@ pub(crate) fn build_mitm_status(config: &RelayGateConfig) -> MitmStatusPayload {
         ca_key_path: key_path.display().to_string(),
         ca_cert_exists: cert_path.exists(),
         ca_key_exists: key_path.exists(),
-        windows_user_root_trusted: windows_user_root_trusted(&cert_path),
+        windows_user_root_trusted: windows_root_trusted(&cert_path),
         windows_relaygate_cas: windows_relaygate_cas(&cert_path),
     }
+}
+
+pub(crate) fn build_mitm_status_fast(config: &RelayGateConfig) -> MitmStatusPayload {
+    let (cert_path, key_path) = mitm_paths();
+
+    MitmStatusPayload {
+        enabled: config.proxy.mitm.enabled,
+        ca_cert_path: cert_path.display().to_string(),
+        ca_key_path: key_path.display().to_string(),
+        ca_cert_exists: cert_path.exists(),
+        ca_key_exists: key_path.exists(),
+        windows_user_root_trusted: None,
+        windows_relaygate_cas: Vec::new(),
+    }
+}
+
+fn mitm_paths() -> (PathBuf, PathBuf) {
+    let storage_dir = mitm_storage_dir();
+    (
+        storage_dir.join("relaygate-ca-cert.pem"),
+        storage_dir.join("relaygate-ca-key.pem"),
+    )
 }
 
 pub(crate) fn remove_ca_windows_trust_only() -> anyhow::Result<String> {
@@ -72,7 +86,7 @@ pub(crate) fn remove_windows_relaygate_ca(id: &str) -> anyhow::Result<String> {
     #[cfg(windows)]
     {
         let (store, thumbprint) = parse_windows_ca_id(id)?;
-        remove_relaygate_thumbprint_from_store_ps(&store, &thumbprint)?;
+        remove_relaygate_thumbprint_from_store(&store, &thumbprint)?;
         return Ok(lang::text("backend.ca.other_removed"));
     }
 
@@ -87,14 +101,14 @@ pub(crate) fn open_folder(path: &PathBuf) -> anyhow::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(windows)]
     {
-        hidden_command("explorer").arg(path).spawn()?;
+        open_folder_with_shell_execute(path)?;
         return Ok(());
     }
 
     #[cfg(not(windows))]
     {
-        hidden_command("xdg-open").arg(path).spawn()?;
-        Ok(())
+        let _ = path;
+        anyhow::bail!("opening folders from RelayGate is only supported on Windows")
     }
 }
 
@@ -116,11 +130,14 @@ fn mitm_storage_dir() -> PathBuf {
         std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join("data")
+            .join("state")
             .join("mitm")
     })
 }
 
-fn windows_user_root_trusted(cert_path: &PathBuf) -> Option<bool> {
+fn windows_root_trusted(cert_path: &PathBuf) -> Option<bool> {
+    // Keep the backend payload field name for compatibility. RelayGate now
+    // manages only the per-user Windows trusted Root store.
     #[cfg(windows)]
     {
         return Some(
@@ -143,59 +160,8 @@ fn windows_root_store_locations(cert_path: &PathBuf) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
 
-    let escaped_path = cert_path.display().to_string().replace('\'', "''");
-    let script = format!(
-        r#"$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('{escaped_path}')
-$thumb = $cert.Thumbprint
-if ([string]::IsNullOrWhiteSpace($thumb)) {{
-  Write-Output ''
-  exit 0
-}}
-
-$hits = New-Object System.Collections.Generic.List[string]
-$stores = @(
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser, 'CurrentUser\Root' ),
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine, 'LocalMachine\Root' )
-)
-
-foreach ($entry in $stores) {{
-  $location = $entry[0]
-  $label = $entry[1]
-  $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-    $location
-  )
-  try {{
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-    $matches = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-    if ($matches.Count -gt 0) {{
-      $hits.Add($label)
-    }}
-  }} finally {{
-    $store.Close()
-  }}
-}}
-
-Write-Output ($hits -join ',')"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stores = stdout
-        .trim()
-        .split(',')
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| item.trim().to_string())
-        .collect::<Vec<_>>();
-    Some(stores)
+    let thumbprint = cert_thumbprint_from_path(cert_path)?;
+    crate::web::windows_cert_store::root_locations_for_thumbprint(&thumbprint).ok()
 }
 
 #[cfg(windows)]
@@ -204,128 +170,23 @@ fn windows_root_store_diagnostics(cert_path: &PathBuf) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
 
-    let escaped_path = cert_path.display().to_string().replace('\'', "''");
-    let script = format!(
-        r#"$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('{escaped_path}')
-$thumb = $cert.Thumbprint
-if ([string]::IsNullOrWhiteSpace($thumb)) {{
-  Write-Output ''
-  exit 0
-}}
-
-$results = New-Object System.Collections.Generic.List[string]
-$stores = @(
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser, 'CurrentUser\Root' ),
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine, 'LocalMachine\Root' )
-)
-
-foreach ($entry in $stores) {{
-  $location = $entry[0]
-  $label = $entry[1]
-  $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-    $location
-  )
-  try {{
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-    $matches = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-    $results.Add($label + ':count=' + $matches.Count)
-  }} finally {{
-    $store.Close()
-  }}
-}}
-
-Write-Output ($results -join ',')"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let items = stdout
-        .trim()
-        .split(',')
-        .filter(|item| !item.trim().is_empty())
-        .map(|item| item.trim().to_string())
-        .collect::<Vec<_>>();
-    Some(items)
-}
-
-#[cfg(windows)]
-#[derive(Debug, Deserialize)]
-struct WindowsRelayGateCaEntry {
-    thumbprint: String,
-    subject: String,
-    issuer: String,
-    not_before: String,
-    not_after: String,
-    store: String,
-    is_current: bool,
+    let thumbprint = cert_thumbprint_from_path(cert_path)?;
+    crate::web::windows_cert_store::root_diagnostics_for_thumbprint(&thumbprint).ok()
 }
 
 #[cfg(windows)]
 fn windows_relaygate_cas_impl(
     cert_path: &PathBuf,
 ) -> anyhow::Result<Vec<WindowsRelayGateCaPayload>> {
-    let current_thumbprint = cert_thumbprint_from_path(cert_path).unwrap_or_default();
-    let script = format!(
-        r#"$current = '{current_thumbprint}'
-$results = @()
-$stores = @(
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser, 'CurrentUser\Root' ),
-  @( [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine, 'LocalMachine\Root' )
-)
+    windows_relaygate_cas_impl_native(cert_path)
+}
 
-foreach ($entry in $stores) {{
-  $location = $entry[0]
-  $label = $entry[1]
-  $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-    [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-    $location
-  )
-  try {{
-    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-    foreach ($cert in $store.Certificates) {{
-      if (($cert.Subject -like '*RelayGate*') -or ($cert.Issuer -like '*RelayGate*')) {{
-        $results += [PSCustomObject]@{{
-          thumbprint = $cert.Thumbprint
-          subject = $cert.Subject
-          issuer = $cert.Issuer
-          not_before = $cert.NotBefore.ToString('yyyy-MM-dd HH:mm:ss')
-          not_after = $cert.NotAfter.ToString('yyyy-MM-dd HH:mm:ss')
-          store = $label
-          is_current = ($cert.Thumbprint -eq $current)
-        }}
-      }}
-    }}
-  }} finally {{
-    $store.Close()
-  }}
-}}
-
-$results | ConvertTo-Json -Compress"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let entries = parse_windows_relaygate_ca_json(&stdout)?;
+#[cfg(windows)]
+fn windows_relaygate_cas_impl_native(
+    cert_path: &PathBuf,
+) -> anyhow::Result<Vec<WindowsRelayGateCaPayload>> {
+    let current_thumbprint = cert_thumbprint_from_path(cert_path);
+    let entries = crate::web::windows_cert_store::relaygate_cas(current_thumbprint.as_deref())?;
     Ok(entries
         .into_iter()
         .map(|entry| {
@@ -335,8 +196,8 @@ $results | ConvertTo-Json -Compress"#
                 thumbprint: entry.thumbprint,
                 subject: entry.subject,
                 issuer: entry.issuer,
-                not_before: entry.not_before,
-                not_after: entry.not_after,
+                not_before: unix_secs_to_utc_string(entry.not_before_unix_secs),
+                not_after: unix_secs_to_utc_string(entry.not_after_unix_secs),
                 store: entry.store,
                 is_current: entry.is_current,
             }
@@ -345,75 +206,63 @@ $results | ConvertTo-Json -Compress"#
 }
 
 #[cfg(windows)]
-fn parse_windows_relaygate_ca_json(json: &str) -> anyhow::Result<Vec<WindowsRelayGateCaEntry>> {
-    if json.trim_start().starts_with('[') {
-        return Ok(serde_json::from_str(json)?);
-    }
-    Ok(vec![serde_json::from_str(json)?])
-}
-
-#[cfg(windows)]
 fn cert_thumbprint_from_path(cert_path: &PathBuf) -> Option<String> {
     if !cert_path.exists() {
         return None;
     }
 
-    let escaped_path = cert_path.display().to_string().replace('\'', "''");
-    let script = format!(
-        r#"$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('{escaped_path}')
-Write-Output $cert.Thumbprint"#
-    );
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    crate::web::windows_cert_store::cert_thumbprint_from_path(cert_path).ok()
+}
+
+#[cfg(windows)]
+fn unix_secs_to_utc_string(secs: i64) -> String {
+    const DAY_SECS: i64 = 86_400;
+    let days = secs.div_euclid(DAY_SECS);
+    let seconds_of_day = secs.rem_euclid(DAY_SECS);
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z")
+}
+
+#[cfg(windows)]
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, i64, i64) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
     }
-    let thumbprint = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if thumbprint.is_empty() {
-        None
-    } else {
-        Some(thumbprint)
-    }
+    (year, month, day)
 }
 
 #[cfg(windows)]
 fn remove_ca_from_windows_user_root(cert_path: &PathBuf) -> anyhow::Result<()> {
-    let escaped_path = cert_path.display().to_string().replace('\'', "''");
-    let thumb_script = format!(
-        r#"$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2('{escaped_path}')
-$thumb = $cert.Thumbprint
-if ([string]::IsNullOrWhiteSpace($thumb)) {{
-  Write-Output ''
-}} else {{
-  Write-Output $thumb
-}}"#
-    );
-
-    let thumb_output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &thumb_script])
-        .output()?;
-
-    if !thumb_output.status.success() {
-        let stderr = String::from_utf8_lossy(&thumb_output.stderr);
+    let Some(thumbprint) = cert_thumbprint_from_path(cert_path) else {
         anyhow::bail!(
             "{}",
-            lang::format("backend.ca.thumb_fail", &[("stderr", stderr.to_string())])
+            lang::format(
+                "backend.ca.thumb_fail",
+                &[(
+                    "stderr",
+                    "unable to read certificate thumbprint".to_string()
+                )]
+            )
         );
-    }
-
-    let thumbprint = String::from_utf8_lossy(&thumb_output.stdout)
-        .trim()
-        .to_string();
-    if thumbprint.is_empty() {
-        return Ok(());
-    }
+    };
 
     let mut failures = Vec::new();
     let mut details = Vec::new();
 
-    match remove_thumbprint_from_store_ps("CurrentUser", &thumbprint) {
+    match remove_current_user_thumbprint_native(&thumbprint, false) {
         Ok(detail) => details.push(format!("CurrentUser\\Root: {detail}")),
         Err(error) => failures.push(format!("CurrentUser\\Root: {error}")),
     }
@@ -460,7 +309,7 @@ fn parse_windows_ca_id(id: &str) -> anyhow::Result<(String, String)> {
         anyhow::bail!("invalid CA id");
     };
     let store = normalize_windows_ca_store_label(store);
-    if !matches!(store.as_str(), "CurrentUser\\Root" | "LocalMachine\\Root") {
+    if store != "CurrentUser\\Root" {
         anyhow::bail!("unsupported CA store: {store}");
     }
     let thumbprint = thumbprint.trim().to_ascii_uppercase();
@@ -476,211 +325,37 @@ fn normalize_windows_ca_store_label(store: &str) -> String {
 }
 
 #[cfg(windows)]
-fn remove_relaygate_thumbprint_from_store_ps(
-    store: &str,
-    thumbprint: &str,
-) -> anyhow::Result<String> {
-    if store == "LocalMachine\\Root" {
-        return remove_relaygate_thumbprint_from_local_machine_root_elevated(thumbprint);
+fn remove_relaygate_thumbprint_from_store(store: &str, thumbprint: &str) -> anyhow::Result<String> {
+    if store == "CurrentUser\\Root" {
+        return remove_current_user_thumbprint_native(thumbprint, true);
     }
 
-    let location = match store {
-        "CurrentUser\\Root" => "CurrentUser",
-        "LocalMachine\\Root" => "LocalMachine",
-        other => anyhow::bail!("unsupported CA store: {other}"),
-    };
-
-    let (store_location_expr, store_label) = match location {
-        "CurrentUser" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser",
-            "CurrentUser\\Root",
-        ),
-        "LocalMachine" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine",
-            "LocalMachine\\Root",
-        ),
-        other => anyhow::bail!("unsupported store location: {other}"),
-    };
-
-    let script = format!(
-        r#"$thumb = '{thumbprint}'
-$store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  {store_location_expr}
-)
-try {{
-  $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-  $before = @($store.Certificates | Where-Object {{
-    $_.Thumbprint -eq $thumb -and (($_.Subject -like '*RelayGate*') -or ($_.Issuer -like '*RelayGate*'))
-  }})
-  foreach ($item in $before) {{
-    $store.Remove($item)
-  }}
-  $after = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-  Write-Output ('before=' + $before.Count + ';after=' + $after.Count)
-}} finally {{
-  $store.Close()
-}}"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("stdout: {stdout}; stderr: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if !stdout.contains("before=0") && stdout.ends_with("after=0") {
-        return Ok(stdout);
-    }
-    if stdout.contains("before=0") {
-        anyhow::bail!("no RelayGate CA matched in {store_label}");
-    }
-    anyhow::bail!(
-        "{}",
-        lang::format(
-            "backend.ca.still.store",
-            &[
-                ("store_label", store_label.to_string()),
-                ("stdout", stdout.clone()),
-            ],
-        )
-    )
+    anyhow::bail!("unsupported CA store: {store}")
 }
 
 #[cfg(windows)]
-fn remove_relaygate_thumbprint_from_local_machine_root_elevated(
+fn remove_current_user_thumbprint_native(
     thumbprint: &str,
+    require_relaygate_name: bool,
 ) -> anyhow::Result<String> {
-    if !relaygate_thumbprint_exists_in_store("LocalMachine\\Root", thumbprint)? {
-        anyhow::bail!("no RelayGate CA matched in LocalMachine\\Root");
+    let result = crate::web::windows_cert_store::delete_thumbprint(
+        crate::web::windows_cert_store::RootStoreScope::CurrentUser,
+        thumbprint,
+        require_relaygate_name,
+    )?;
+    let stdout = format!("before={};after={}", result.before, result.after);
+
+    if require_relaygate_name && result.before == 0 {
+        anyhow::bail!("no RelayGate CA matched in CurrentUser\\Root");
     }
 
-    let launch_script = format!(
-        r#"$process = Start-Process -FilePath certutil.exe -ArgumentList @('-delstore','Root','{thumbprint}') -Verb RunAs -Wait -PassThru
-exit $process.ExitCode"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &launch_script])
-        .output();
-
-    let output = output?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("administrator approval failed or removal was cancelled; stdout: {stdout}; stderr: {stderr}");
-    }
-
-    if relaygate_thumbprint_exists_in_store("LocalMachine\\Root", thumbprint)? {
+    if result.after != 0 {
         anyhow::bail!(
             "{}",
             lang::format(
                 "backend.ca.still.store",
                 &[
-                    ("store_label", "LocalMachine\\Root".to_string()),
-                    ("stdout", "after=1".to_string()),
-                ],
-            )
-        );
-    }
-
-    Ok("LocalMachine\\Root: elevated removal completed".to_string())
-}
-
-#[cfg(windows)]
-fn relaygate_thumbprint_exists_in_store(store: &str, thumbprint: &str) -> anyhow::Result<bool> {
-    let (store_location_expr, _) = match store {
-        "CurrentUser\\Root" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser",
-            "CurrentUser\\Root",
-        ),
-        "LocalMachine\\Root" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine",
-            "LocalMachine\\Root",
-        ),
-        other => anyhow::bail!("unsupported CA store: {other}"),
-    };
-    let script = format!(
-        r#"$thumb = '{thumbprint}'
-$store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  {store_location_expr}
-)
-try {{
-  $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
-  $matches = @($store.Certificates | Where-Object {{
-    $_.Thumbprint -eq $thumb -and (($_.Subject -like '*RelayGate*') -or ($_.Issuer -like '*RelayGate*'))
-  }})
-  if ($matches.Count -gt 0) {{ Write-Output 'present' }} else {{ Write-Output 'missing' }}
-}} finally {{
-  $store.Close()
-}}"#
-    );
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "present")
-}
-
-#[cfg(windows)]
-fn remove_thumbprint_from_store_ps(location: &str, thumbprint: &str) -> anyhow::Result<String> {
-    let (store_location_expr, store_label) = match location {
-        "CurrentUser" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser",
-            "CurrentUser\\Root",
-        ),
-        "LocalMachine" => (
-            "[System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine",
-            "LocalMachine\\Root",
-        ),
-        other => anyhow::bail!("unsupported store location: {other}"),
-    };
-
-    let script = format!(
-        r#"$thumb = '{thumbprint}'
-$store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
-  [System.Security.Cryptography.X509Certificates.StoreName]::Root,
-  {store_location_expr}
-)
-try {{
-  $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-  $before = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-  foreach ($item in $before) {{
-    $store.Remove($item)
-  }}
-  $after = @($store.Certificates | Where-Object {{ $_.Thumbprint -eq $thumb }})
-  Write-Output ('before=' + $before.Count + ';after=' + $after.Count)
-}} finally {{
-  $store.Close()
-}}"#
-    );
-
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!("stdout: {stdout}; stderr: {stderr}");
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if stdout.contains("after=") && !stdout.ends_with("after=0") {
-        anyhow::bail!(
-            "{}",
-            lang::format(
-                "backend.ca.still.store",
-                &[
-                    ("store_label", store_label.to_string()),
+                    ("store_label", "CurrentUser\\Root".to_string()),
                     ("stdout", stdout.clone()),
                 ],
             )
@@ -690,11 +365,30 @@ try {{
     Ok(stdout)
 }
 
-fn hidden_command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
+#[cfg(windows)]
+fn open_folder_with_shell_execute(path: &PathBuf) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let target: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+
+    if result as isize <= 32 {
+        anyhow::bail!("failed to open folder: {}", path.display());
     }
-    command
+
+    Ok(())
 }

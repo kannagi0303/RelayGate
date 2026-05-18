@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result};
 use regex::Regex;
 use scraper::{ElementRef, Html, Selector};
-use serde::{de, Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_json::Value as JsonValue;
 use serde_yaml::Value as YamlValue;
 
@@ -17,8 +17,8 @@ use crate::path_mode::{app_path_mode, AppPathMode};
 
 /// First rewrite rule engine.
 /// It currently covers the first site-specific rewrite features and follows this model:
-/// - load rewrite YAML rules into memory on startup / hot reload
-/// - keep render template paths and read template HTML only when a rule matches
+/// - load rewrite and patch YAML rules on startup / hot reload
+/// - read render templates lazily with async file I/O when a rule actually matches
 /// - use loaded rule hosts to decide CONNECT interception
 /// - use loaded rule URL matches to decide page rewrites
 
@@ -47,7 +47,7 @@ struct LoadedPatchRule {
     json: Option<LoadedJsonPatchRule>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewriteRuleFile {
     pub id: String,
     #[serde(default = "default_true")]
@@ -108,7 +108,7 @@ struct LoadedJsonPatchRule {
     pipe: Vec<PatchPipeStep>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RewriteFieldRule {
     pub select: String,
     pub value: Option<String>,
@@ -126,7 +126,7 @@ struct LoadedRewriteFieldRule {
     selector: Selector,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum RewritePipeStep {
     Regex { regex: String },
     Template { template: String },
@@ -135,6 +135,145 @@ pub enum RewritePipeStep {
     Unique,
     JoinMap { join: String },
     Trim,
+}
+
+impl<'de> Deserialize<'de> for RewritePipeStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = YamlValue::deserialize(deserializer)?;
+
+        match value {
+            YamlValue::String(step) => {
+                rewrite_pipe_step_from_name(&step, YamlValue::Null).map_err(de::Error::custom)
+            }
+            YamlValue::Mapping(map) => {
+                if map.len() != 1 {
+                    return Err(de::Error::custom(
+                        "rewrite pipe step mapping must have exactly one key",
+                    ));
+                }
+
+                let (key, raw_value) = map.into_iter().next().unwrap();
+                let Some(key) = key.as_str() else {
+                    return Err(de::Error::custom("rewrite pipe step key must be string"));
+                };
+
+                rewrite_pipe_step_from_name(key, raw_value).map_err(de::Error::custom)
+            }
+            _ => Err(de::Error::custom(
+                "rewrite pipe step must be a string like `trim` or a mapping like `{ join: ... }`",
+            )),
+        }
+    }
+}
+
+fn rewrite_pipe_step_from_name(
+    name: &str,
+    raw_value: YamlValue,
+) -> Result<RewritePipeStep, String> {
+    match normalize_step_name(name).as_str() {
+        "regex" => Ok(RewritePipeStep::Regex {
+            regex: yaml_step_string_arg(raw_value, "regex", "regex")?,
+        }),
+        "template" => Ok(RewritePipeStep::Template {
+            template: yaml_step_string_arg(raw_value, "template", "template")?,
+        }),
+        "notempty" => Ok(RewritePipeStep::NotEmpty(yaml_step_optional_string_arg(
+            raw_value,
+            "not_empty",
+        )?)),
+        "absoluteurl" | "absoluteurlmap" => Ok(RewritePipeStep::AbsoluteUrlMap {
+            absolute_url: yaml_absolute_url_arg(raw_value)?,
+        }),
+        "unique" => Ok(RewritePipeStep::Unique),
+        "join" | "joinmap" => Ok(RewritePipeStep::JoinMap {
+            join: yaml_step_string_arg(raw_value, "join", "join")?,
+        }),
+        "trim" => Ok(RewritePipeStep::Trim),
+        other => Err(format!("unsupported rewrite pipe step: {other}")),
+    }
+}
+
+fn normalize_step_name(name: &str) -> String {
+    name.chars()
+        .filter(|ch| *ch != '_' && *ch != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn yaml_step_string_arg(
+    value: YamlValue,
+    field_name: &str,
+    step_name: &str,
+) -> Result<String, String> {
+    match value {
+        YamlValue::String(value) => Ok(value),
+        YamlValue::Mapping(map) => {
+            let Some(value) = yaml_mapping_get(map, field_name) else {
+                return Err(format!(
+                    "rewrite pipe step `{step_name}` requires string value or `{field_name}: ...`"
+                ));
+            };
+            serde_yaml::from_value::<String>(value).map_err(|error| error.to_string())
+        }
+        other => serde_yaml::from_value::<String>(other).map_err(|error| error.to_string()),
+    }
+}
+
+fn yaml_step_optional_string_arg(
+    value: YamlValue,
+    field_name: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        YamlValue::Null => Ok(None),
+        YamlValue::String(value) if value.is_empty() => Ok(None),
+        YamlValue::String(value) => Ok(Some(value)),
+        YamlValue::Mapping(map) => {
+            let Some(value) = yaml_mapping_get(map, field_name) else {
+                return Ok(None);
+            };
+            match value {
+                YamlValue::Null => Ok(None),
+                other => serde_yaml::from_value::<String>(other)
+                    .map(Some)
+                    .map_err(|error| error.to_string()),
+            }
+        }
+        other => serde_yaml::from_value::<String>(other)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn yaml_absolute_url_arg(value: YamlValue) -> Result<AbsoluteUrlStep, String> {
+    match value {
+        YamlValue::Mapping(map) => {
+            if let Some(value) = yaml_mapping_get(map.clone(), "absolute_url") {
+                return serde_yaml::from_value::<AbsoluteUrlStep>(value)
+                    .map_err(|error| error.to_string());
+            }
+            if let Some(value) = yaml_mapping_get(map.clone(), "absolute_url_map") {
+                return serde_yaml::from_value::<AbsoluteUrlStep>(value)
+                    .map_err(|error| error.to_string());
+            }
+            serde_yaml::from_value::<AbsoluteUrlStep>(YamlValue::Mapping(map))
+                .map_err(|error| error.to_string())
+        }
+        other => {
+            serde_yaml::from_value::<AbsoluteUrlStep>(other).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn yaml_mapping_get(map: serde_yaml::Mapping, wanted_key: &str) -> Option<YamlValue> {
+    let wanted = normalize_step_name(wanted_key);
+    map.into_iter().find_map(|(key, value)| {
+        key.as_str()
+            .filter(|key| normalize_step_name(key) == wanted)
+            .map(|_| value)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +292,42 @@ pub enum PatchPipeStep {
     Remove { keys: Vec<String> },
 }
 
+impl<'de> Deserialize<'de> for PatchPipeStep {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = YamlValue::deserialize(deserializer)?;
+
+        match value {
+            YamlValue::Mapping(map) => {
+                if map.len() != 1 {
+                    return Err(de::Error::custom(
+                        "patch pipe step mapping must have exactly one key",
+                    ));
+                }
+
+                let (key, raw_value) = map.into_iter().next().unwrap();
+                let Some(key) = key.as_str() else {
+                    return Err(de::Error::custom("patch pipe step key must be string"));
+                };
+
+                match key {
+                    "remove" => Ok(Self::Remove {
+                        keys: yaml_string_list(raw_value).map_err(de::Error::custom)?,
+                    }),
+                    _ => Err(de::Error::custom(format!(
+                        "unsupported patch pipe step key: {key}"
+                    ))),
+                }
+            }
+            _ => Err(de::Error::custom(
+                "patch pipe step must be mapping like `{ remove: [...] }`",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PatchApplyResult {
     pub body: Vec<u8>,
@@ -166,7 +341,58 @@ pub struct RenderApplyResult {
     pub allow_adblock_injection: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug)]
+struct PreparedRenderRule {
+    template_path: PathBuf,
+    context: HashMap<String, FieldValue>,
+    allow_adblock_injection: bool,
+}
+
+pub async fn apply_matching_rule_shared(
+    registry: &SharedRewriteRegistry,
+    html: &[u8],
+    page_url: &str,
+) -> Result<RenderApplyResult> {
+    if has_render_bypass_magic_word(page_url) {
+        return Ok(RenderApplyResult {
+            body: html.to_vec(),
+            matched: false,
+            allow_adblock_injection: true,
+        });
+    }
+
+    let prepared = {
+        let registry = registry
+            .read()
+            .map_err(|_| anyhow::anyhow!("rewrite registry lock poisoned"))?;
+        registry.prepare_matching_render(html, page_url)?
+    };
+
+    let Some(prepared) = prepared else {
+        return Ok(RenderApplyResult {
+            body: html.to_vec(),
+            matched: false,
+            allow_adblock_injection: true,
+        });
+    };
+
+    let template = tokio::fs::read_to_string(&prepared.template_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to read rewrite template: {}",
+                prepared.template_path.display()
+            )
+        })?;
+    let rendered = render_template(&template, &prepared.context);
+    Ok(RenderApplyResult {
+        body: rendered.into_bytes(),
+        matched: true,
+        allow_adblock_injection: prepared.allow_adblock_injection,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AbsoluteUrlStep {
     pub base: String,
 }
@@ -175,7 +401,7 @@ impl RewriteRegistry {
     pub fn load_default() -> Result<Self> {
         let mut render_rules = Vec::new();
         for path in collect_yaml_paths(&rewrite_sites_dir())? {
-            let loaded = load_rule_file(&path)?;
+            let loaded = load_rewrite_rule_file(&path)?;
             if loaded.rule.enabled {
                 render_rules.push(loaded);
             }
@@ -218,21 +444,13 @@ impl RewriteRegistry {
                 .any(|rule| rule.hosts.contains(&host))
     }
 
-    pub fn apply_matching_rule(&self, html: &[u8], page_url: &str) -> Result<RenderApplyResult> {
-        if has_render_bypass_magic_word(page_url) {
-            return Ok(RenderApplyResult {
-                body: html.to_vec(),
-                matched: false,
-                allow_adblock_injection: true,
-            });
-        }
-
+    fn prepare_matching_render(
+        &self,
+        html: &[u8],
+        page_url: &str,
+    ) -> Result<Option<PreparedRenderRule>> {
         let Some(rule) = self.find_matching_rule(page_url) else {
-            return Ok(RenderApplyResult {
-                body: html.to_vec(),
-                matched: false,
-                allow_adblock_injection: true,
-            });
+            return Ok(None);
         };
 
         let html = String::from_utf8_lossy(html).to_string();
@@ -245,18 +463,11 @@ impl RewriteRegistry {
             }
         }
 
-        let template = fs::read_to_string(&rule.template_path).with_context(|| {
-            format!(
-                "failed to read rewrite template during render: {}",
-                rule.template_path.display()
-            )
-        })?;
-        let rendered = render_template(&template, &context);
-        Ok(RenderApplyResult {
-            body: rendered.into_bytes(),
-            matched: true,
+        Ok(Some(PreparedRenderRule {
+            template_path: rule.template_path.clone(),
+            context,
             allow_adblock_injection: rule.rule.adblock,
-        })
+        }))
     }
 
     pub fn apply_patch_rules(
@@ -328,90 +539,11 @@ pub fn reload_shared_registry(shared: &SharedRewriteRegistry) -> Result<usize> {
     Ok(count)
 }
 
-impl<'de> Deserialize<'de> for RewritePipeStep {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = YamlValue::deserialize(deserializer)?;
-
-        match value {
-            YamlValue::String(flag) => match flag.as_str() {
-                "notempty" => Ok(Self::NotEmpty(None)),
-                "unique" => Ok(Self::Unique),
-                "trim" => Ok(Self::Trim),
-                _ => Err(de::Error::custom(format!(
-                    "unsupported pipe step string: {flag}"
-                ))),
-            },
-            YamlValue::Mapping(map) => {
-                if map.len() != 1 {
-                    return Err(de::Error::custom(
-                        "pipe step mapping must have exactly one key",
-                    ));
-                }
-
-                let (key, raw_value) = map.into_iter().next().unwrap();
-                let Some(key) = key.as_str() else {
-                    return Err(de::Error::custom("pipe step key must be string"));
-                };
-
-                match key {
-                    "regex" => Ok(Self::Regex {
-                        regex: yaml_string(raw_value).map_err(de::Error::custom)?,
-                    }),
-                    "template" => Ok(Self::Template {
-                        template: yaml_string(raw_value).map_err(de::Error::custom)?,
-                    }),
-                    "notempty" => Ok(Self::NotEmpty(Some(
-                        yaml_string(raw_value).map_err(de::Error::custom)?,
-                    ))),
-                    "absolute_url" => Ok(Self::AbsoluteUrlMap {
-                        absolute_url: serde_yaml::from_value(raw_value)
-                            .map_err(de::Error::custom)?,
-                    }),
-                    "join" => Ok(Self::JoinMap {
-                        join: yaml_string(raw_value).map_err(de::Error::custom)?,
-                    }),
-                    _ => Err(de::Error::custom(format!(
-                        "unsupported pipe step key: {key}"
-                    ))),
-                }
-            }
-            _ => Err(de::Error::custom("unsupported pipe step YAML value")),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PatchPipeStep {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = YamlValue::deserialize(deserializer)?;
-        let YamlValue::Mapping(map) = value else {
-            return Err(de::Error::custom("patch pipe step must be mapping"));
-        };
-        if map.len() != 1 {
-            return Err(de::Error::custom(
-                "patch pipe step mapping must have exactly one key",
-            ));
-        }
-
-        let (key, raw_value) = map.into_iter().next().unwrap();
-        let Some(key) = key.as_str() else {
-            return Err(de::Error::custom("patch pipe step key must be string"));
-        };
-
-        match key {
-            "remove" => Ok(Self::Remove {
-                keys: yaml_string_list(raw_value).map_err(de::Error::custom)?,
-            }),
-            _ => Err(de::Error::custom(format!(
-                "unsupported patch pipe step key: {key}"
-            ))),
-        }
-    }
+pub async fn reload_shared_registry_blocking(shared: &SharedRewriteRegistry) -> Result<usize> {
+    let shared = Arc::clone(shared);
+    tokio::task::spawn_blocking(move || reload_shared_registry(&shared))
+        .await
+        .context("rewrite registry reload task failed")?
 }
 
 #[derive(Debug, Clone)]
@@ -420,29 +552,31 @@ enum FieldValue {
     Multiple(Vec<String>),
 }
 
-fn load_rule_file(path: &Path) -> Result<LoadedRewriteRule> {
+fn load_rewrite_rule_file(path: &Path) -> Result<LoadedRewriteRule> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed to read rewrite rule file: {}", path.display()))?;
     let rule = serde_yaml::from_str::<RewriteRuleFile>(&content)
         .with_context(|| format!("failed to parse rewrite rule file: {}", path.display()))?;
 
+    compile_rewrite_rule(rule)
+        .with_context(|| format!("failed to compile rewrite rule file: {}", path.display()))
+}
+
+fn load_patch_rule_file(path: &Path) -> Result<LoadedPatchRule> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read patch rule file: {}", path.display()))?;
+    let rule = serde_yaml::from_str::<PatchRuleFile>(&content)
+        .with_context(|| format!("failed to parse patch rule file: {}", path.display()))?;
+
+    compile_patch_rule(rule, path)
+}
+
+fn compile_rewrite_rule(rule: RewriteRuleFile) -> Result<LoadedRewriteRule> {
     if rule.render.trim().is_empty() {
         anyhow::bail!("rewrite rule `{}` is missing render template", rule.id);
     }
 
     let template_path = rewrite_template_path(&rule.render);
-    let template_metadata = fs::metadata(&template_path).with_context(|| {
-        format!(
-            "failed to stat rewrite template: {}",
-            template_path.display()
-        )
-    })?;
-    if !template_metadata.is_file() {
-        anyhow::bail!(
-            "rewrite template is not a regular file: {}",
-            template_path.display()
-        );
-    }
 
     let mut matchers = Vec::new();
     for pattern in &rule.match_rules {
@@ -471,12 +605,7 @@ fn load_rule_file(path: &Path) -> Result<LoadedRewriteRule> {
     })
 }
 
-fn load_patch_rule_file(path: &Path) -> Result<LoadedPatchRule> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed to read patch rule file: {}", path.display()))?;
-    let rule = serde_yaml::from_str::<PatchRuleFile>(&content)
-        .with_context(|| format!("failed to parse patch rule file: {}", path.display()))?;
-
+fn compile_patch_rule(rule: PatchRuleFile, source_path: &Path) -> Result<LoadedPatchRule> {
     let hosts = rule
         .hosts
         .iter()
@@ -489,7 +618,7 @@ fn load_patch_rule_file(path: &Path) -> Result<LoadedPatchRule> {
         vars.insert(
             name,
             LoadedVarPatchRule {
-                matchers: compile_matchers(&item.match_rules, path)?,
+                matchers: compile_matchers(&item.match_rules, source_path)?,
                 pipe: normalize_patch_pipe(item.remove, item.pipe),
             },
         );
@@ -497,7 +626,7 @@ fn load_patch_rule_file(path: &Path) -> Result<LoadedPatchRule> {
 
     let json = match rule.json {
         Some(item) => Some(LoadedJsonPatchRule {
-            matchers: compile_matchers(&item.match_rules, path)?,
+            matchers: compile_matchers(&item.match_rules, source_path)?,
             pipe: normalize_patch_pipe(item.remove, item.pipe),
         }),
         None => None,
@@ -1028,13 +1157,17 @@ fn add_render_bypass_magic_word(page_url: &str) -> String {
 }
 
 fn rewrite_sites_dir() -> PathBuf {
-    find_existing_subdir(&["data", "rewrite"])
-        .unwrap_or_else(|| preferred_base_dir().join("data").join("rewrite"))
+    find_existing_subdir(&["data", "user", "rewrite"]).unwrap_or_else(|| {
+        preferred_base_dir()
+            .join("data")
+            .join("user")
+            .join("rewrite")
+    })
 }
 
 fn patch_sites_dir() -> PathBuf {
-    find_existing_subdir(&["data", "patch"])
-        .unwrap_or_else(|| preferred_base_dir().join("data").join("patch"))
+    find_existing_subdir(&["data", "user", "patch"])
+        .unwrap_or_else(|| preferred_base_dir().join("data").join("user").join("patch"))
 }
 
 pub fn render_rule_dir() -> PathBuf {
@@ -1046,9 +1179,10 @@ pub fn patch_rule_dir() -> PathBuf {
 }
 
 fn rewrite_template_path(file_name: &str) -> PathBuf {
-    find_existing_file(&["data", "rewrite"], file_name).unwrap_or_else(|| {
+    find_existing_file(&["data", "user", "rewrite"], file_name).unwrap_or_else(|| {
         preferred_base_dir()
             .join("data")
+            .join("user")
             .join("rewrite")
             .join(file_name)
     })
@@ -1144,13 +1278,6 @@ fn parse_first_srcset_url(srcset: &str) -> String {
                 .to_string()
         })
         .unwrap_or_default()
-}
-
-fn yaml_string(value: YamlValue) -> Result<String, String> {
-    value
-        .as_str()
-        .map(|text| text.to_string())
-        .ok_or_else(|| "pipe step value must be string".to_string())
 }
 
 fn yaml_string_list(value: YamlValue) -> Result<Vec<String>, String> {

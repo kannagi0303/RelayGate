@@ -5,12 +5,10 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use crate::path_mode::{app_path_mode, AppPathMode};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tracing::warn;
-
-use crate::path_mode::{app_path_mode, AppPathMode};
 
 pub type SharedResourceReplaceRegistry = Arc<RwLock<ResourceReplaceRegistry>>;
 
@@ -34,7 +32,7 @@ pub struct ResourceReplacement {
     pub rule_id: String,
     pub status: u16,
     pub content_type: String,
-    pub body: Vec<u8>,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,7 +177,7 @@ impl ResourceReplaceRegistry {
         self.rules
             .iter()
             .find(|rule| rule.matches(target_url, source_url))
-            .and_then(|rule| rule.load_replacement_body())
+            .map(|rule| rule.replacement())
     }
 
     pub fn rule_infos(&self) -> Vec<ResourceRuleInfo> {
@@ -217,23 +215,12 @@ impl LoadedResourceRule {
                 .unwrap_or(true)
     }
 
-    fn load_replacement_body(&self) -> Option<ResourceReplacement> {
-        match fs::read(&self.response.path) {
-            Ok(body) => Some(ResourceReplacement {
-                rule_id: self.id.clone(),
-                status: self.response.status,
-                content_type: self.response.content_type.clone(),
-                body,
-            }),
-            Err(error) => {
-                warn!(
-                    rule = %self.id,
-                    path = %self.response.path.display(),
-                    error = %error,
-                    "resource replacement matched but response body could not be read"
-                );
-                None
-            }
+    fn replacement(&self) -> ResourceReplacement {
+        ResourceReplacement {
+            rule_id: self.id.clone(),
+            status: self.response.status,
+            content_type: self.response.content_type.clone(),
+            path: self.response.path.clone(),
         }
     }
 }
@@ -246,6 +233,15 @@ pub fn reload_shared_registry(shared: &SharedResourceReplaceRegistry) -> Result<
     })?;
     *guard = reloaded;
     Ok(count)
+}
+
+pub async fn reload_shared_registry_blocking(
+    shared: &SharedResourceReplaceRegistry,
+) -> Result<usize> {
+    let shared = Arc::clone(shared);
+    tokio::task::spawn_blocking(move || reload_shared_registry(&shared))
+        .await
+        .context("resource replacement registry reload task failed")?
 }
 
 pub fn set_rule_enabled_default(id: &str, enabled: bool) -> Result<()> {
@@ -312,7 +308,10 @@ fn rule_file_path() -> PathBuf {
 }
 
 fn resource_replace_dir() -> PathBuf {
-    preferred_base_dir().join("data").join("resource_replace")
+    preferred_base_dir()
+        .join("data")
+        .join("user")
+        .join("resource_replace")
 }
 
 fn preferred_base_dir() -> PathBuf {

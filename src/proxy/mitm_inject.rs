@@ -28,7 +28,7 @@ impl DocumentInjectionResult {
 ///
 /// 1. adblock cosmetic/scriptlet runtime
 /// 2. user-script isolated runtime
-pub(crate) fn inject_relaygate_document(
+pub(crate) async fn inject_relaygate_document(
     target_url: &str,
     response_body: Vec<u8>,
     content_type: Option<&str>,
@@ -39,7 +39,7 @@ pub(crate) fn inject_relaygate_document(
     let adblock_snippet =
         adblock::render_document_injection(adblock_state, target_url, &response_body);
     let user_script_snippet =
-        user_script::render_document_injection(user_script_registry, target_url, is_frame);
+        user_script::render_document_injection(user_script_registry, target_url, is_frame).await;
 
     let adblock_injected = adblock_snippet.is_some();
     let user_script_injected = user_script_snippet.is_some();

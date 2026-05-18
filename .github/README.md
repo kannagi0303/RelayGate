@@ -134,10 +134,11 @@ See [Browser Proxy Setup](../docs/browser-proxy-setup.md).
 
 RelayGate may create runtime data under the directory where it runs.
 
-This can include local settings, logs, DNS cache, rule data, and HTTPS MITM CA
-files.
+User-owned data is stored under `data/user/`. RelayGate-generated state is
+stored under `data/state/`. This can include local settings, logs, DNS cache,
+rule data, downloaded adblock data, learned connection health, diagnostics, and HTTPS MITM CA files.
 
-Keep runtime data private, especially CA-related files.
+Keep runtime data private, especially CA-related files under `data/state/mitm/`.
 
 For details, see [Privacy And Data](../docs/privacy-and-data.md).
 

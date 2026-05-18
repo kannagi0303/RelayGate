@@ -1,32 +1,25 @@
 use std::{
-    collections::HashSet,
-    fs,
-    io::{BufRead, BufReader},
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use tokio::fs as async_fs;
 use tracing::warn;
 
 use super::{
-    matching::{scope_matches, scope_summary},
-    metadata::{classify_metadata, parse_metadata_block},
-    model::{UserScriptEntry, UserScriptListItem, UserScriptStatus},
-    paths::{script_dir, ENABLED_FILE_NAME},
+    matching::{scope_summary, CompiledUserScriptMatcher},
+    model::{UserScriptEntry, UserScriptListItem},
+    paths::{ensure_script_dir_ready, store_path},
+    store::{self, UserScriptStore, UserScriptStoreRecord},
     wrapper::{build_script_tag, build_wrapper},
 };
 
 #[derive(Debug, Default)]
 pub struct UserScriptRegistry {
     entries: Vec<UserScriptEntry>,
-    enabled_file: PathBuf,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default)]
-struct EnabledFile {
-    enabled: Vec<String>,
+    store_path: PathBuf,
 }
 
 pub(crate) fn set_enabled_default(
@@ -34,16 +27,14 @@ pub(crate) fn set_enabled_default(
     filename: &str,
     enabled: bool,
 ) -> Result<usize> {
-    let (enabled_file, mut enabled_names) = {
+    let (store_path, store) = {
         let guard = shared
             .read()
             .map_err(|_| anyhow::anyhow!("user script registry lock poisoned"))?;
-        guard.enabled_update_plan(filename, enabled)?
+        guard.store_with_enabled(filename, enabled)?
     };
 
-    enabled_names.sort();
-    enabled_names.dedup();
-    save_enabled_names(&enabled_file, &enabled_names)?;
+    store::save_store(&store_path, &store)?;
 
     let next = UserScriptRegistry::load_default()?;
     let count = next.entry_count();
@@ -55,36 +46,19 @@ pub(crate) fn set_enabled_default(
 
 impl UserScriptRegistry {
     pub(crate) fn load_default() -> Result<Self> {
-        let dir = script_dir();
-        let enabled_file = dir.join(ENABLED_FILE_NAME);
-        let enabled_file_exists = enabled_file.exists();
-        let enabled_names = load_enabled_names(&enabled_file)?;
-        let mut entries = if dir.exists() {
-            scan_entries(&dir, &enabled_names)?
-        } else {
-            Vec::new()
-        };
-        entries.sort_by(|a, b| a.filename.cmp(&b.filename));
-
-        let existing_names = entries
+        let dir = ensure_script_dir_ready()?;
+        let loaded = store::load_or_rebuild(&dir)?;
+        let mut entries = loaded
+            .store
+            .scripts
             .iter()
-            .map(|entry| entry.filename.clone())
-            .collect::<HashSet<_>>();
-        let cleaned_enabled = enabled_names
-            .into_iter()
-            .filter(|name| existing_names.contains(name))
+            .map(|record| record_to_entry(&dir, record, &loaded.source_cache))
             .collect::<Vec<_>>();
-        if enabled_file_exists {
-            save_enabled_names(&enabled_file, &cleaned_enabled)?;
-        }
-        for entry in &mut entries {
-            entry.enabled = cleaned_enabled.iter().any(|name| name == &entry.filename)
-                && !entry.status.is_error();
-        }
+        entries.sort_by(|a, b| a.filename.cmp(&b.filename));
 
         Ok(Self {
             entries,
-            enabled_file,
+            store_path: store_path(),
         })
     }
 
@@ -103,18 +77,9 @@ impl UserScriptRegistry {
         target_url: &str,
         is_frame: Option<bool>,
     ) -> bool {
-        self.entries.iter().any(|entry| {
-            if !entry.enabled {
-                return false;
-            }
-            let Some(metadata) = entry.metadata.as_ref() else {
-                return false;
-            };
-            if metadata.noframes && is_frame == Some(true) {
-                return false;
-            }
-            scope_matches(metadata, target_url)
-        })
+        self.entries
+            .iter()
+            .any(|entry| entry_matches_target(entry, target_url, is_frame))
     }
 
     pub(crate) fn list_items(&self) -> Vec<UserScriptListItem> {
@@ -135,6 +100,11 @@ impl UserScriptRegistry {
                     match_summary: metadata
                         .map(scope_summary)
                         .unwrap_or_else(|| entry.error.clone().unwrap_or_else(|| "-".to_string())),
+                    comment: entry
+                        .error
+                        .clone()
+                        .or_else(|| metadata.and_then(|item| item.description.clone()))
+                        .unwrap_or_default(),
                     enabled: entry.enabled,
                     operable: !entry.status.is_error(),
                     error: entry.error.clone(),
@@ -143,7 +113,11 @@ impl UserScriptRegistry {
             .collect()
     }
 
-    fn enabled_update_plan(&self, filename: &str, enabled: bool) -> Result<(PathBuf, Vec<String>)> {
+    fn store_with_enabled(
+        &self,
+        filename: &str,
+        enabled: bool,
+    ) -> Result<(PathBuf, UserScriptStore)> {
         let entry = self
             .entries
             .iter()
@@ -153,134 +127,122 @@ impl UserScriptRegistry {
             anyhow::bail!("user script `{filename}` cannot be enabled because it has parse errors");
         }
 
-        let mut enabled_names = self
+        let scripts = self
             .entries
             .iter()
-            .filter(|entry| entry.enabled && !entry.status.is_error())
-            .map(|entry| entry.filename.clone())
+            .map(|entry| {
+                let next_enabled = if entry.filename == filename {
+                    enabled && !entry.status.is_error()
+                } else {
+                    entry.enabled && !entry.status.is_error()
+                };
+                UserScriptStoreRecord {
+                    filename: entry.filename.clone(),
+                    path: entry.filename.clone(),
+                    enabled: next_enabled,
+                    size: entry.size,
+                    modified_ms: entry.modified_ms,
+                    metadata: entry.metadata.clone(),
+                    status: entry.status,
+                    error: entry.error.clone(),
+                }
+            })
             .collect::<Vec<_>>();
 
-        if enabled {
-            if !enabled_names.iter().any(|name| name == filename) {
-                enabled_names.push(filename.to_string());
-            }
-        } else {
-            enabled_names.retain(|name| name != filename);
-        }
-
-        Ok((self.enabled_file.clone(), enabled_names))
+        Ok((self.store_path.clone(), UserScriptStore { scripts }))
     }
 
-    pub(crate) fn render_document_injection(
+    pub(crate) fn matching_entries(
         &self,
         target_url: &str,
         is_frame: Option<bool>,
-    ) -> Option<String> {
-        let snippets = self
-            .entries
+    ) -> Vec<UserScriptEntry> {
+        self.entries
             .iter()
-            .filter(|entry| entry.enabled)
-            .filter_map(|entry| render_entry_if_matches(entry, target_url, is_frame))
-            .collect::<Vec<_>>();
-
-        if snippets.is_empty() {
-            None
-        } else {
-            Some(snippets.join("\n"))
-        }
+            .filter(|entry| entry_matches_target(entry, target_url, is_frame))
+            .cloned()
+            .collect()
     }
 }
 
-fn scan_entries(dir: &Path, enabled_names: &[String]) -> Result<Vec<UserScriptEntry>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read user script dir: {}", dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("js") {
-            continue;
-        }
-        let Some(filename) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if !filename.ends_with(".user.js") {
-            continue;
-        }
+fn record_to_entry(
+    script_dir: &Path,
+    record: &UserScriptStoreRecord,
+    source_cache: &BTreeMap<String, Arc<str>>,
+) -> UserScriptEntry {
+    let path = script_dir.join(&record.path);
+    let matcher = record
+        .metadata
+        .as_ref()
+        .filter(|_| !record.status.is_error())
+        .map(CompiledUserScriptMatcher::compile);
 
-        let enabled = enabled_names.iter().any(|name| name == filename);
-        entries.push(load_script_entry(&path, filename.to_string(), enabled));
-    }
-    Ok(entries)
-}
-
-fn load_script_entry(path: &Path, filename: String, enabled: bool) -> UserScriptEntry {
-    match read_metadata_block(path).and_then(|block| parse_metadata_block(&block)) {
-        Ok(metadata) => {
-            let status = classify_metadata(&metadata);
-            UserScriptEntry {
-                filename,
-                path: path.to_path_buf(),
-                metadata: Some(metadata),
-                status,
-                error: None,
-                enabled,
-            }
-        }
-        Err(error) => UserScriptEntry {
-            filename,
-            path: path.to_path_buf(),
-            metadata: None,
-            status: UserScriptStatus::Error,
-            error: Some(error.to_string()),
-            enabled: false,
-        },
+    UserScriptEntry {
+        filename: record.filename.clone(),
+        path,
+        metadata: record.metadata.clone(),
+        matcher,
+        source_cache: Arc::new(tokio::sync::Mutex::new(
+            source_cache.get(&record.filename).cloned(),
+        )),
+        status: record.status,
+        error: record.error.clone(),
+        enabled: record.enabled && !record.status.is_error(),
+        size: record.size,
+        modified_ms: record.modified_ms,
     }
 }
 
-fn read_metadata_block(path: &Path) -> Result<String> {
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open user script: {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut block = String::new();
-    let mut in_block = false;
-
-    for line in reader.lines() {
-        let line = line
-            .with_context(|| format!("failed to read user script metadata: {}", path.display()))?;
-        if line.contains("// ==UserScript==") {
-            in_block = true;
-        }
-        if in_block {
-            block.push_str(&line);
-            block.push('\n');
-        }
-        if in_block && line.contains("// ==/UserScript==") {
-            return Ok(block);
-        }
+fn entry_matches_target(entry: &UserScriptEntry, target_url: &str, is_frame: Option<bool>) -> bool {
+    if !entry.enabled {
+        return false;
     }
-
-    if in_block {
-        anyhow::bail!("missing userscript metadata end")
-    } else {
-        anyhow::bail!("missing userscript metadata start")
-    }
-}
-
-fn render_entry_if_matches(
-    entry: &UserScriptEntry,
-    target_url: &str,
-    is_frame: Option<bool>,
-) -> Option<String> {
-    let metadata = entry.metadata.as_ref()?;
+    let Some(metadata) = entry.metadata.as_ref() else {
+        return false;
+    };
     if metadata.noframes && is_frame == Some(true) {
-        return None;
+        return false;
     }
-    if !scope_matches(metadata, target_url) {
-        return None;
+    entry
+        .matcher
+        .as_ref()
+        .map(|matcher| matcher.matches(target_url))
+        .unwrap_or(false)
+}
+
+pub(crate) async fn render_matching_entries(entries: Vec<UserScriptEntry>) -> Option<String> {
+    let mut snippets = Vec::new();
+    for entry in entries {
+        if let Some(snippet) = render_matched_entry(&entry).await {
+            snippets.push(snippet);
+        }
     }
-    let source = match fs::read_to_string(&entry.path) {
-        Ok(source) => source,
+
+    if snippets.is_empty() {
+        None
+    } else {
+        Some(snippets.join("\n"))
+    }
+}
+
+async fn render_matched_entry(entry: &UserScriptEntry) -> Option<String> {
+    let metadata = entry.metadata.as_ref()?;
+    let source = load_source_cached(entry).await?;
+    Some(build_script_tag(&build_wrapper(
+        entry,
+        metadata,
+        source.as_ref(),
+    )))
+}
+
+async fn load_source_cached(entry: &UserScriptEntry) -> Option<Arc<str>> {
+    let mut cache = entry.source_cache.lock().await;
+    if let Some(source) = cache.as_ref() {
+        return Some(source.clone());
+    }
+
+    let source = match async_fs::read_to_string(&entry.path).await {
+        Ok(source) => Arc::<str>::from(source),
         Err(error) => {
             warn!(
                 script = %entry.filename,
@@ -291,46 +253,6 @@ fn render_entry_if_matches(
             return None;
         }
     };
-    Some(build_script_tag(&build_wrapper(entry, metadata, &source)))
-}
-
-fn load_enabled_names(path: &Path) -> Result<Vec<String>> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    let text = fs::read_to_string(path).with_context(|| {
-        format!(
-            "failed to read user script enabled file: {}",
-            path.display()
-        )
-    })?;
-    let file: EnabledFile = serde_yaml::from_str(&text).with_context(|| {
-        format!(
-            "failed to parse user script enabled file: {}",
-            path.display()
-        )
-    })?;
-    Ok(file.enabled)
-}
-
-fn save_enabled_names(path: &Path, names: &[String]) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create user script enabled dir: {}",
-                parent.display()
-            )
-        })?;
-    }
-    let file = EnabledFile {
-        enabled: names.to_vec(),
-    };
-    let yaml =
-        serde_yaml::to_string(&file).context("failed to serialize user script enabled file")?;
-    fs::write(path, yaml).with_context(|| {
-        format!(
-            "failed to write user script enabled file: {}",
-            path.display()
-        )
-    })
+    *cache = Some(source.clone());
+    Some(source)
 }

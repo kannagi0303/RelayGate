@@ -20,14 +20,15 @@ Rules can be used for:
 
 Runtime rewrite data is local and private.
 
-Typical runtime folders:
+Typical user rule folders:
 
 ```text
-data/rewrite/
-data/resource_replace/
+data/user/rewrite/
+data/user/patch/
+data/user/resource_replace/
 ```
 
-Do not publish private rule files unless they are meant to be public examples.
+Do not publish private rule files unless you intentionally want to share those rules.
 
 ## HTTPS Sites
 

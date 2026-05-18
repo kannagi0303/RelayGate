@@ -9,7 +9,7 @@ const { t } = useI18n();
 const payload = computed(() => backend.gateway ?? { items: [], upstream_options: [] });
 const upstreams = computed(() => backend.upstreams?.items ?? []);
 const upstreamsById = computed(() =>
-  new Map(upstreams.value.map((item: any) => [String(item.id), item])),
+  new Map<string, any>(upstreams.value.map((item: any) => [String(item.id), item])),
 );
 const form = reactive({
   mount_path: "",
@@ -79,7 +79,7 @@ function upstreamLabel(id: string | null | undefined) {
       <form class="table-inline-form gateway-add-form" @submit.prevent="add">
         <label>
           <span>{{ t("gateway_page.mount_path") }}</span>
-          <input v-model="form.mount_path" type="text" placeholder="/site/" />
+          <input v-model="form.mount_path" type="text" placeholder="site" />
         </label>
         <label>
           <span>{{ t("gateway_page.target") }}</span>

@@ -7,10 +7,10 @@ use crate::{
         header_hop::should_apply_request_header_rewrite,
         http_parse::ParsedHttpRequest,
         local_response::{
-            resource_replacement_response_bytes, should_abort_adblock_request,
-            simple_response_bytes, simple_response_bytes_with_content_type,
+            should_abort_adblock_request, simple_response_bytes,
+            simple_response_bytes_with_content_type,
         },
-        resource_replace::SharedResourceReplaceRegistry,
+        resource_replace::{ResourceReplacement, SharedResourceReplaceRegistry},
         rules::{RuleEffect, RuleEngine, RuleRequestContext},
         upstream::SharedUpstreamRegistry,
     },
@@ -29,6 +29,7 @@ pub(crate) struct OutboundRequestState {
 pub(crate) enum OutboundRequestDecision {
     Continue(PreparedOutboundRequest),
     Respond(Vec<u8>),
+    RespondResource(ResourceReplacement),
     Close,
 }
 
@@ -100,9 +101,7 @@ pub(crate) fn prepare_outbound_request(
                 url = %target_url,
                 "{resource_log}"
             );
-            return Ok(OutboundRequestDecision::Respond(
-                resource_replacement_response_bytes(&replacement),
-            ));
+            return Ok(OutboundRequestDecision::RespondResource(replacement));
         }
     }
 

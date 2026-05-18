@@ -17,12 +17,12 @@ with a short, non-sensitive summary and ask for a private contact path.
 Do not include these in public reports:
 
 - CA private keys
-- `data/mitm/`
-- private logs
+- `data/state/mitm/`
+- private logs, diagnostics, and generated state under `data/state/`
 - private proxy routes
-- private DNS routes
-- private User Scripts
-- private rewrite or replacement rules
+- private DNS routes under `data/user/settings.yaml > dns`
+- private User Scripts under `data/user/user_script/`
+- private rewrite, patch, or replacement rules under `data/user/`
 
 Logs can contain host names, URLs, request details, and local runtime state.
 Review and redact them before sharing.

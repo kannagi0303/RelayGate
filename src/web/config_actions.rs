@@ -4,18 +4,20 @@ use std::net::{IpAddr, SocketAddr};
 use crate::{
     adblock,
     config::{
-        AdblockModeSetting, DnsConfig, DnsProfileConfig, DnsProfileMode, DnsRouteConfig,
-        DownstreamProtocolPreferenceConfig, MountSiteConfig, RelayGateConfig, UpstreamConfig,
-        UpstreamProtocolPreferenceConfig, UpstreamRouteConfig, UpstreamRoutingConfig,
+        gateway_mount_id_from_user_input, gateway_mount_path_from_id, AdblockModeSetting,
+        DnsConfig, DnsProfileConfig, DnsProfileMode, DnsRouteConfig,
+        DownstreamProtocolPreferenceConfig, GatewayConfig, MountSiteConfig, RelayGateConfig,
+        UpstreamConfig, UpstreamProtocolPreferenceConfig, UpstreamRouteConfig,
+        UpstreamRoutingConfig,
     },
     dns, lang,
-    proxy::{resource_replace, upstream},
+    proxy::{gateway_mount, resource_replace, upstream},
     rewrite, user_script,
     web::{
         action_forms::{
-            DeleteItemForm, DnsProfileForm, DnsRouteForm, GatewayMountForm, MoveItemForm,
-            ToggleItemForm, UpdateProtocolSettingsForm, UpdateSettingForm, UpstreamForm,
-            UpstreamRouteForm,
+            DeleteItemForm, DnsFeatureToggleForm, DnsProfileForm, DnsRouteForm, GatewayMountForm,
+            MoveItemForm, ToggleItemForm, UpdateProtocolSettingsForm, UpdateSettingForm,
+            UpstreamForm, UpstreamRouteForm,
         },
         server::WebAppState,
     },
@@ -38,34 +40,34 @@ pub(crate) fn update_single_setting(
         "proxy.protocol.downstream_preferred" => {
             config.downstream_protocol = parse_downstream_preferred_protocol(&form.value)?
         }
-        "proxy.mitm.disable_fast_path" => {
-            config.disable_mitm_fast_path = parse_bool_setting(&form.value)?
-        }
-        "adblock.debug_log" => config.adblock_debug_log = parse_bool_setting(&form.value)?,
         "locale" | "app.locale" => config.locale = parse_locale_setting(&form.value)?,
         _ => anyhow::bail!("unsupported setting key: {}", form.key),
     }
 
     config.apply_fixed_product_defaults();
     config.web.open_browser_on_launch = false;
-    if matches!(form.key.as_str(), "adblock.mode" | "adblock.debug_log") {
-        adblock::reload_shared_state(&state.adblock_state, &config)?;
+    if matches!(form.key.as_str(), "adblock.mode") {
+        adblock::set_mode(&state.adblock_state, config.proxy.adblock.effective_mode());
     }
 
-    write_relaygate_config(state, &config)?;
-    state.protocol_runtime.replace_from_config(&config);
-    store_current_config(state, config);
-    state.runtime.notify_status_changed();
-    state.runtime.notify_settings_changed();
-    if matches!(form.key.as_str(), "locale" | "app.locale") {
-        state.runtime.notify_i18n_changed();
-    }
     if matches!(
         form.key.as_str(),
-        "adblock.mode" | "proxy.mitm.disable_fast_path" | "adblock.debug_log"
+        "listen" | "proxy.listen" | "locale" | "app.locale"
     ) {
-        state.runtime.notify_adblock_changed();
+        write_relaygate_root_config(state, &config)?;
+    } else {
+        write_relaygate_settings_store(state, &config)?;
     }
+    state.protocol_runtime.replace_from_config(&config);
+    store_current_config(state, config);
+    let mut changed = vec!["status", "settings"];
+    if matches!(form.key.as_str(), "locale" | "app.locale") {
+        changed.push("i18n");
+    }
+    if matches!(form.key.as_str(), "adblock.mode") {
+        changed.push("adblock");
+    }
+    state.runtime.notify_backend_changed(&changed);
 
     if matches!(
         form.key.as_str(),
@@ -306,27 +308,17 @@ fn dns_profile_id_from_server(ip: IpAddr, port: u16) -> String {
     }
     let id = id.trim_matches('-');
     if port == 53 {
-        id.to_string()
+        format!("server-{id}")
     } else {
-        format!("{id}-{port}")
+        format!("server-{id}-{port}")
     }
 }
 
 pub(crate) fn toggle_dns_profile_config(
-    state: &WebAppState,
-    form: ToggleItemForm,
+    _state: &WebAppState,
+    _form: ToggleItemForm,
 ) -> anyhow::Result<String> {
-    let mut config = current_dns_config(state);
-    let enabled = parse_bool(&form.enabled)?;
-    let Some(item) = config.profiles.iter_mut().find(|item| item.id == form.id) else {
-        anyhow::bail!("DNS profile `{}` was not found", form.id);
-    };
-    item.enabled = enabled;
-    save_dns_and_notify(state, config)?;
-    Ok(format!(
-        "Updated DNS profile `{}`. 已熱套用並清空 DNS 快取。",
-        form.id
-    ))
+    anyhow::bail!("DNS servers are enabled by default and cannot be toggled")
 }
 
 pub(crate) fn delete_dns_profile_config(
@@ -342,44 +334,29 @@ pub(crate) fn delete_dns_profile_config(
     if config.profiles.len() == before {
         anyhow::bail!("DNS profile `{}` was not found", form.id);
     }
-    for route in &mut config.routes {
-        if route.profile_id == form.id {
-            route.enabled = false;
-        }
-    }
+    let removed_routes = config.routes.len();
+    config.routes.retain(|route| route.profile_id != form.id);
+    let removed_routes = removed_routes.saturating_sub(config.routes.len());
     save_dns_and_notify(state, config)?;
-    Ok(format!(
-        "Deleted DNS profile `{}`. Routes using it were disabled. 已熱套用並清空 DNS 快取。",
-        form.id
-    ))
+    if removed_routes == 0 {
+        Ok(format!(
+            "Deleted DNS profile `{}`. 已熱套用並清空 DNS 快取。",
+            form.id
+        ))
+    } else {
+        Ok(format!(
+            "Deleted DNS profile `{}` and {removed_routes} DNS route(s). 已熱套用並清空 DNS 快取。",
+            form.id
+        ))
+    }
 }
 
 pub(crate) fn move_dns_profile_config(
-    state: &WebAppState,
+    _state: &WebAppState,
     form: MoveItemForm,
 ) -> anyhow::Result<String> {
-    let mut config = current_dns_config(state);
-    let Some(index) = config.profiles.iter().position(|item| item.id == form.id) else {
-        anyhow::bail!("DNS profile `{}` was not found", form.id);
-    };
-    let target = match form.direction.trim().to_ascii_lowercase().as_str() {
-        "up" => index.checked_sub(1),
-        "down" => {
-            if index + 1 < config.profiles.len() {
-                Some(index + 1)
-            } else {
-                None
-            }
-        }
-        other => anyhow::bail!("unsupported move direction: {other}"),
-    }
-    .with_context(|| format!("DNS profile `{}` cannot move {}", form.id, form.direction))?;
-    config.profiles.swap(index, target);
-    save_dns_and_notify(state, config)?;
-    Ok(format!(
-        "Moved DNS profile `{}` {}. 已熱套用並清空 DNS 快取。",
-        form.id, form.direction
-    ))
+    let _requested = (&form.id, &form.direction);
+    anyhow::bail!("DNS server ordering is managed by RelayGate defaults")
 }
 
 pub(crate) fn add_dns_route_config(
@@ -389,19 +366,17 @@ pub(crate) fn add_dns_route_config(
     let mut config = current_dns_config(state);
     let host_pattern = form.host_pattern.trim().to_ascii_lowercase();
     dns::validate_host_pattern(&host_pattern)?;
-    if !config
-        .profiles
-        .iter()
-        .any(|item| item.enabled && item.id == form.profile_id)
-    {
-        anyhow::bail!("enabled DNS profile `{}` was not found", form.profile_id);
+    if !config.profiles.iter().any(|item| {
+        item.enabled && item.mode != DnsProfileMode::System && item.id == form.profile_id
+    }) {
+        anyhow::bail!("enabled DNS server `{}` was not found", form.profile_id);
     }
     let id = unique_dns_route_id(&config, &host_pattern);
     config.routes.push(DnsRouteConfig {
         id: id.clone(),
         host_pattern,
         profile_id: form.profile_id,
-        strict: form.strict.is_some(),
+        strict: true,
         enabled: true,
     });
     save_dns_and_notify(state, config)?;
@@ -409,20 +384,10 @@ pub(crate) fn add_dns_route_config(
 }
 
 pub(crate) fn toggle_dns_route_config(
-    state: &WebAppState,
-    form: ToggleItemForm,
+    _state: &WebAppState,
+    _form: ToggleItemForm,
 ) -> anyhow::Result<String> {
-    let mut config = current_dns_config(state);
-    let enabled = parse_bool(&form.enabled)?;
-    let Some(item) = config.routes.iter_mut().find(|item| item.id == form.id) else {
-        anyhow::bail!("DNS route `{}` was not found", form.id);
-    };
-    item.enabled = enabled;
-    save_dns_and_notify(state, config)?;
-    Ok(format!(
-        "Updated DNS route `{}`. 已熱套用並清空 DNS 快取。",
-        form.id
-    ))
+    anyhow::bail!("DNS routes are an internal behavior and cannot be toggled")
 }
 
 pub(crate) fn delete_dns_route_config(
@@ -442,13 +407,24 @@ pub(crate) fn delete_dns_route_config(
     ))
 }
 
+pub(crate) fn toggle_dns_feature_config(
+    _state: &WebAppState,
+    form: DnsFeatureToggleForm,
+) -> anyhow::Result<String> {
+    let _requested = (&form.feature, &form.enabled);
+    anyhow::bail!(
+        "DNS warm cache, observation, and auto-select are built-in behaviours and cannot be toggled"
+    )
+}
+
 pub(crate) fn add_gateway_mount_config(
     state: &WebAppState,
     form: GatewayMountForm,
 ) -> anyhow::Result<String> {
     let mut config = current_config(state);
     let routing = current_upstream_routing(&config);
-    let mount_path = normalize_mount_path(&form.mount_path)?;
+    let id = gateway_mount_id_from_user_input(&form.mount_path)?;
+    let mount_path = gateway_mount_path_from_id(&id);
     let target_base_url = normalize_target_base_url(&form.target_base_url)?;
     let upstream_id = normalize_optional_upstream_id(&form.upstream_id);
     if let Some(upstream_id) = upstream_id.as_ref() {
@@ -460,17 +436,11 @@ pub(crate) fn add_gateway_mount_config(
             anyhow::bail!("enabled upstream `{upstream_id}` was not found");
         }
     }
-    if config
-        .gateway
-        .mounts
-        .iter()
-        .any(|item| item.mount_path.trim_end_matches('/') == mount_path.trim_end_matches('/'))
-    {
-        anyhow::bail!("mount path `{mount_path}` already exists");
+    if config.gateway.mounts.iter().any(|item| item.id == id) {
+        anyhow::bail!("mount `{id}` already exists");
     }
-    let id = unique_gateway_mount_id(&config, &mount_path);
 
-    config.gateway.mounts.push(MountSiteConfig {
+    let mount = MountSiteConfig {
         id: id.clone(),
         mount_path,
         target_base_url,
@@ -479,8 +449,10 @@ pub(crate) fn add_gateway_mount_config(
         rewrite_links: form.rewrite_links.is_some(),
         passthrough_mode: false,
         minimal_page_mode: None,
-    });
-    save_config_and_notify(state, config, &["status", "settings", "gateway"])?;
+    };
+    GatewayConfig::save_mount_default(&mount)?;
+    config.gateway.mounts.push(mount);
+    save_gateway_and_notify(state, config)?;
     Ok(format!("Saved mount `{id}`."))
 }
 
@@ -499,7 +471,8 @@ pub(crate) fn toggle_gateway_mount_config(
         anyhow::bail!("mount `{}` was not found", form.id);
     };
     item.enabled = enabled;
-    save_config_and_notify(state, config, &["status", "settings", "gateway"])?;
+    GatewayConfig::save_mount_default(item)?;
+    save_gateway_and_notify(state, config)?;
     Ok(format!("Updated mount `{}`.", form.id))
 }
 
@@ -513,42 +486,46 @@ pub(crate) fn delete_gateway_mount_config(
     if config.gateway.mounts.len() == before {
         anyhow::bail!("mount `{}` was not found", form.id);
     }
-    save_config_and_notify(state, config, &["status", "settings", "gateway"])?;
+    GatewayConfig::delete_mount_default(&form.id)?;
+    save_gateway_and_notify(state, config)?;
     Ok(format!("Deleted mount `{}`.", form.id))
 }
 
-pub(crate) fn toggle_resource_replace_rule_config(
+pub(crate) async fn toggle_resource_replace_rule_config(
     state: &WebAppState,
     form: ToggleItemForm,
 ) -> anyhow::Result<String> {
     let enabled = parse_bool(&form.enabled)?;
     resource_replace::set_rule_enabled_default(&form.id, enabled)?;
-    let rule_count = reload_resource_replace_runtime(state)?;
+    let rule_count = reload_resource_replace_runtime(state).await?;
     Ok(format!(
         "Resource Replace 規則 `{}` 已儲存並熱套用。已載入 {rule_count} 條規則。",
         form.id
     ))
 }
 
-pub(crate) fn reload_rewrite_runtime(state: &WebAppState) -> anyhow::Result<usize> {
-    let rule_count = rewrite::reload_shared_registry(&state.rewrite_registry)?;
-    state.runtime.notify_status_changed();
-    state.runtime.notify_patch_changed();
-    state.runtime.notify_render_changed();
+pub(crate) async fn reload_rewrite_runtime(state: &WebAppState) -> anyhow::Result<usize> {
+    let rule_count = rewrite::reload_shared_registry_blocking(&state.rewrite_registry).await?;
+    state
+        .runtime
+        .notify_backend_changed(&["status", "patch", "render"]);
     Ok(rule_count)
 }
 
-pub(crate) fn reload_resource_replace_runtime(state: &WebAppState) -> anyhow::Result<usize> {
-    let rule_count = resource_replace::reload_shared_registry(&state.resource_replace_registry)?;
-    state.runtime.notify_status_changed();
-    state.runtime.notify_resource_replace_changed();
+pub(crate) async fn reload_resource_replace_runtime(state: &WebAppState) -> anyhow::Result<usize> {
+    let rule_count =
+        resource_replace::reload_shared_registry_blocking(&state.resource_replace_registry).await?;
+    state
+        .runtime
+        .notify_backend_changed(&["status", "resource_replace"]);
     Ok(rule_count)
 }
 
 pub(crate) fn reload_user_script_runtime(state: &WebAppState) -> anyhow::Result<usize> {
     let count = user_script::reload_shared_registry(&state.user_script_registry)?;
-    state.runtime.notify_status_changed();
-    state.runtime.notify_user_script_changed();
+    state
+        .runtime
+        .notify_backend_changed(&["status", "user_script"]);
     Ok(count)
 }
 
@@ -561,8 +538,7 @@ pub(crate) fn current_config(state: &WebAppState) -> RelayGateConfig {
 }
 
 pub(crate) fn current_upstream_routing(config: &RelayGateConfig) -> UpstreamRoutingConfig {
-    UpstreamRoutingConfig::load_default_or_config(config)
-        .unwrap_or_else(|_| UpstreamRoutingConfig::from_main_config(config))
+    UpstreamRoutingConfig::from_main_config(config)
 }
 
 fn current_dns_config(state: &WebAppState) -> DnsConfig {
@@ -579,12 +555,20 @@ fn save_routing_and_notify(
     state: &WebAppState,
     routing: UpstreamRoutingConfig,
 ) -> anyhow::Result<()> {
-    routing.save_default()?;
+    routing.validate()?;
+
+    let mut config = current_config(state);
+    config.upstreams = routing.upstreams.clone();
+    config.upstream_routes = routing.upstream_routes.clone();
+    config.apply_fixed_product_defaults();
+    write_relaygate_settings_store(state, &config)?;
+
     upstream::replace_shared_registry(
         &state.upstreams,
         &routing.upstreams,
         &routing.upstream_routes,
     )?;
+    store_current_config(state, config);
     state
         .runtime
         .notify_backend_changed(&["status", "settings", "upstreams", "upstream_routes"]);
@@ -592,6 +576,7 @@ fn save_routing_and_notify(
 }
 
 fn save_dns_and_notify(state: &WebAppState, config: DnsConfig) -> anyhow::Result<()> {
+    config.validate()?;
     config.save_default()?;
     dns::replace_shared_config(&state.dns_resolver, config)?;
     state
@@ -606,29 +591,54 @@ fn save_config_and_notify(
     changed: &[&str],
 ) -> anyhow::Result<()> {
     config.apply_fixed_product_defaults();
-    write_relaygate_config(state, &config)?;
+    write_relaygate_settings_store(state, &config)?;
+    if changed.iter().any(|section| *section == "gateway") {
+        gateway_mount::replace_shared_registry(&state.gateway_mounts, &config.gateway.mounts)?;
+    }
     state.protocol_runtime.replace_from_config(&config);
     store_current_config(state, config);
     state.runtime.notify_backend_changed(changed);
     Ok(())
 }
 
-fn write_relaygate_config(state: &WebAppState, config: &RelayGateConfig) -> anyhow::Result<()> {
-    if let Some(parent) = state.config_path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
+fn save_gateway_and_notify(state: &WebAppState, mut config: RelayGateConfig) -> anyhow::Result<()> {
+    config.apply_fixed_product_defaults();
+    let routing = current_upstream_routing(&config);
+    config.validate_runtime_references(&routing)?;
+    gateway_mount::replace_shared_registry(&state.gateway_mounts, &config.gateway.mounts)?;
+    store_current_config(state, config);
+    state
+        .runtime
+        .notify_backend_changed(&["status", "settings", "gateway"]);
+    Ok(())
+}
+
+fn write_relaygate_settings_store(
+    state: &WebAppState,
+    config: &RelayGateConfig,
+) -> anyhow::Result<()> {
+    config
+        .save_settings_to_path(state.settings_store_path.as_ref())
+        .with_context(|| {
             format!(
-                "failed to create RelayGate config directory: {}",
-                parent.display()
+                "failed to write RelayGate settings store: {}",
+                state.settings_store_path.display()
             )
-        })?;
-    }
-    let yaml = serde_yaml::to_string(config)?;
-    std::fs::write(&*state.config_path, yaml).with_context(|| {
-        format!(
-            "failed to write RelayGate config file: {}",
-            state.config_path.display()
-        )
-    })
+        })
+}
+
+fn write_relaygate_root_config(
+    state: &WebAppState,
+    config: &RelayGateConfig,
+) -> anyhow::Result<()> {
+    config
+        .save_root_config_to_path(state.root_config_path.as_ref())
+        .with_context(|| {
+            format!(
+                "failed to write RelayGate root config: {}",
+                state.root_config_path.display()
+            )
+        })
 }
 
 fn unique_upstream_id(routing: &UpstreamRoutingConfig, address: &str) -> anyhow::Result<String> {
@@ -655,17 +665,6 @@ fn unique_dns_route_id(config: &DnsConfig, host_pattern: &str) -> String {
     let base = slug_id(&format!("dns-{host_pattern}"));
     unique_id(base, |candidate| {
         config.routes.iter().any(|item| item.id == candidate)
-    })
-}
-
-fn unique_gateway_mount_id(config: &RelayGateConfig, mount_path: &str) -> String {
-    let base = slug_id(&format!("gateway-{mount_path}"));
-    unique_id(base, |candidate| {
-        config
-            .gateway
-            .mounts
-            .iter()
-            .any(|item| item.id == candidate)
     })
 }
 
@@ -748,28 +747,6 @@ fn validate_dns_servers(servers: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn normalize_mount_path(value: &str) -> anyhow::Result<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        anyhow::bail!("mount path cannot be empty");
-    }
-    if trimmed.contains("://") || trimmed.contains('?') || trimmed.contains('#') {
-        anyhow::bail!("mount path must be a local path such as /site/");
-    }
-    let mut path = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    };
-    if !path.ends_with('/') {
-        path.push('/');
-    }
-    if path == "/" {
-        anyhow::bail!("mount path cannot be the site root");
-    }
-    Ok(path)
-}
-
 fn normalize_target_base_url(value: &str) -> anyhow::Result<String> {
     let trimmed = value.trim().trim_end_matches('/').to_string();
     let uri = trimmed.parse::<axum::http::Uri>()?;
@@ -806,14 +783,6 @@ fn parse_adblock_mode_setting(value: &str) -> anyhow::Result<AdblockModeSetting>
         "standard" => Ok(AdblockModeSetting::Standard),
         "aggressive" => Ok(AdblockModeSetting::Aggressive),
         _ => anyhow::bail!("unsupported adblock mode: {value}"),
-    }
-}
-
-fn parse_bool_setting(value: &str) -> anyhow::Result<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Ok(true),
-        "false" | "0" | "no" | "off" => Ok(false),
-        _ => anyhow::bail!("unsupported boolean setting: {value}"),
     }
 }
 
@@ -858,7 +827,6 @@ fn setting_key_label(key: &str) -> String {
         "adblock.mode" => lang::text("settings.adblock.label"),
         "proxy.protocol.upstream_preferred" => lang::text("settings.protocol.upstream.label"),
         "proxy.protocol.downstream_preferred" => lang::text("settings.protocol.downstream.label"),
-        "proxy.mitm.disable_fast_path" => "MITM 快速路徑".to_string(),
         _ => key.to_string(),
     }
 }

@@ -1,6 +1,7 @@
 use std::{
     collections::{hash_map::DefaultHasher, BTreeSet},
     fmt,
+    future::poll_fn,
     hash::{Hash, Hasher},
     net::IpAddr,
     time::Duration,
@@ -31,8 +32,8 @@ use crate::{
         mitm_core::{
             allow_active_h3_buffered_for_request, has_browser_storage_access_header,
             mitm_response_pipeline_decision, prepare_mitm_request, process_mitm_response_body,
-            response_body_pipeline_preflight_reason, MitmLocalResponse, MitmRequestDecision,
-            PreparedMitmRequest,
+            response_body_pipeline_preflight_reason, MitmLocalResponse, MitmLocalResponseBody,
+            MitmRequestDecision, PreparedMitmRequest,
         },
         mitm_http::{is_upstream_certificate_error, log_response_body},
         mount_forward::header_pairs_from_reqwest,
@@ -100,6 +101,18 @@ fn is_expected_h2_upstream_connect_failure(error: &anyhow::Error) -> bool {
             || text.contains("timed out")
             || text.contains("連線嘗試失敗")
     })
+}
+
+fn h3_streaming_backend_error_should_cooldown(kind: upstream_h3::UpstreamBackendErrorKind) -> bool {
+    matches!(
+        kind,
+        upstream_h3::UpstreamBackendErrorKind::DnsError
+            | upstream_h3::UpstreamBackendErrorKind::UdpError
+            | upstream_h3::UpstreamBackendErrorKind::QuicConnectTimeout
+            | upstream_h3::UpstreamBackendErrorKind::QuicHandshakeError
+            | upstream_h3::UpstreamBackendErrorKind::TlsError
+            | upstream_h3::UpstreamBackendErrorKind::H3Error
+    )
 }
 
 fn is_expected_h2_accept_shutdown(error: &h2::Error) -> bool {
@@ -226,7 +239,7 @@ async fn handle_mitm_h2_stream(
             &target_url,
             "h2",
         );
-        return send_h2_local_response(respond, response, method == http::Method::HEAD);
+        return send_h2_local_response(respond, response, method == http::Method::HEAD).await;
     }
 
     let prepared_request = match prepare_mitm_request(
@@ -249,7 +262,7 @@ async fn handle_mitm_h2_stream(
 
             drain_h2_request_body(body).await?;
             debug!(reason = reason, url = %target_url, "MITM HTTP/2 local response");
-            return send_h2_local_response(respond, response, method == http::Method::HEAD);
+            return send_h2_local_response(respond, response, method == http::Method::HEAD).await;
         }
         MitmRequestDecision::Close { reason } => {
             if h2_request_decision_should_reset_stream(reason) {
@@ -288,7 +301,8 @@ async fn handle_mitm_h2_stream(
         return send_h2_not_implemented_response(
             respond,
             "RelayGate downstream HTTP/2 CONNECT streams are not implemented yet.\n",
-        );
+        )
+        .await;
     }
 
     let is_head = parts.method == http::Method::HEAD;
@@ -374,7 +388,8 @@ async fn handle_h2_websocket_extended_connect(
                 "RelayGate upstream WebSocket handshake did not switch protocols.\n",
             ),
             false,
-        );
+        )
+        .await;
     }
 
     let response_headers = HeaderMap::new();
@@ -779,7 +794,6 @@ async fn send_h2_upstream_request(
                 .upstream_connector()
                 .try_http3_streaming_response_for_mitm_parts(
                     true,
-                    "h2",
                     &prepared_request.method,
                     &prepared_request.target_url,
                     &prepared_request.traffic_host,
@@ -882,6 +896,9 @@ async fn send_h2_upstream_request(
                                             &engine.mitm_response_state().config.traffic,
                                         );
                                     }
+                                    upstream_h3::clear_http3_active_streaming_authority_failure(
+                                        &prepared_request.traffic_host,
+                                    );
                                     drop(observed_permit.take());
                                     drop(traffic_permit.take());
                                     debug!(
@@ -1037,10 +1054,39 @@ async fn send_h2_upstream_request(
                         }
                     }
                     Err(h3_probe) => {
-                        h3_streaming_trace.mark(
-                            "connector_error",
-                            h3_probe.fallback_error_code().unwrap_or("none"),
+                        let reason_code = h3_probe
+                            .fallback_error
+                            .as_ref()
+                            .map(|error| error.kind.code())
+                            .unwrap_or("not_streaming_response");
+                        let reason_detail = h3_probe
+                            .fallback_error
+                            .as_ref()
+                            .map(|error| error.detail.clone())
+                            .unwrap_or_else(|| {
+                                "H3 active streaming path did not produce a forwardable streaming response"
+                                    .to_string()
+                            });
+
+                        h3_streaming_trace.mark("connector_error", reason_code);
+                        upstream_h3::record_http3_active_streaming_writer_fallback(
+                            "h2_stream",
+                            &h3_probe.authority,
+                            h3_probe.attempt_plan.h3_candidate.as_ref(),
+                            None,
+                            None,
+                            reason_code,
+                            reason_detail.clone(),
                         );
+                        if let Some(error) = &h3_probe.fallback_error {
+                            if h3_streaming_backend_error_should_cooldown(error.kind) {
+                                upstream_h3::record_http3_active_streaming_authority_failure(
+                                    &h3_probe.authority,
+                                    reason_code,
+                                    reason_detail.clone(),
+                                );
+                            }
+                        }
                         debug!(
                             authority = %h3_probe.authority,
                             decision = h3_probe.decision_label(),
@@ -1055,7 +1101,8 @@ async fn send_h2_upstream_request(
             }
         }
 
-        if !protocol_snapshot.upstream_http3_buffered_enabled
+        if h3_direct_path_allowed
+            && !protocol_snapshot.upstream_http3_buffered_enabled
             && !protocol_snapshot.upstream_http3_streaming_enabled
             && protocol_snapshot.upstream_http3_probe_enabled
         {
@@ -1161,7 +1208,8 @@ async fn send_h2_upstream_request(
                             "RelayGate request body limit exceeded.",
                         ),
                         is_head,
-                    );
+                    )
+                    .await;
                 }
 
                 if let Some(reqwest_error) = error.downcast_ref::<reqwest::Error>() {
@@ -1175,7 +1223,8 @@ async fn send_h2_upstream_request(
                                 "RelayGate could not validate the upstream TLS certificate.",
                             ),
                             is_head,
-                        );
+                        )
+                        .await;
                     }
                 }
 
@@ -1207,6 +1256,17 @@ async fn send_h2_upstream_request(
                 return Err(error);
             }
         };
+
+        if prepared_request.upstream.upstream_id.is_none() {
+            if let Some(remote_addr) = upstream_response.remote_addr() {
+                engine
+                    .dns_resolver()
+                    .record_origin_connect_success_observed(
+                        &prepared_request.traffic_host,
+                        remote_addr.ip(),
+                    );
+            }
+        }
 
         downstream_status::record_upstream_response(
             &prepared_request.traffic_host,
@@ -1362,7 +1422,8 @@ async fn send_h2_upstream_request(
                         respond,
                         traffic_reload_local_response(delay, &prepared_request.target_url),
                         is_head,
-                    );
+                    )
+                    .await;
                 }
                 TrafficResponseDecision::Forward => {}
             }
@@ -1392,6 +1453,7 @@ async fn send_h2_upstream_request(
         ),
         is_head,
     )
+    .await
 }
 
 async fn handle_h2_upstream_response(
@@ -1479,7 +1541,8 @@ async fn handle_h2_upstream_response(
                 "RelayGate response buffer limit exceeded while preparing rewrite, patch, or injection.",
             ),
             false,
-        );
+        )
+        .await;
     }
 
     let response_body = match read_limited_h2_response_body(
@@ -1507,7 +1570,8 @@ async fn handle_h2_upstream_response(
                     "RelayGate response buffer limit exceeded while preparing rewrite, patch, or injection.",
                 ),
                 false,
-            );
+            )
+            .await;
         }
     };
 
@@ -1521,6 +1585,7 @@ async fn handle_h2_upstream_response(
         response_body,
         &response_decision.effects,
     )
+    .await
     .with_context(|| {
         format!(
             "failed to process MITM HTTP/2 response body for {}",
@@ -1950,33 +2015,56 @@ fn h2_request_decision_should_reset_stream(reason: &str) -> bool {
     matches!(reason, "adblock_blocked" | "request_rule_block")
 }
 
-fn send_h2_local_response(
+async fn send_h2_local_response(
     respond: h2::server::SendResponse<Bytes>,
     response: MitmLocalResponse,
+    is_head: bool,
+) -> Result<()> {
+    match response.body {
+        MitmLocalResponseBody::Bytes(body) => {
+            send_h2_local_bytes_response(
+                respond,
+                response.status_code,
+                &response.content_type,
+                body,
+                is_head,
+            )
+            .await
+        }
+        MitmLocalResponseBody::Resource(replacement) => {
+            send_h2_resource_replacement_response(respond, replacement, is_head).await
+        }
+    }
+}
+
+async fn send_h2_local_bytes_response(
+    respond: h2::server::SendResponse<Bytes>,
+    status_code: u16,
+    content_type: &str,
+    body: Vec<u8>,
     is_head: bool,
 ) -> Result<()> {
     let mut headers = HeaderMap::new();
     headers.insert(
         reqwest::header::CONTENT_TYPE,
-        HeaderValue::from_str(&response.content_type)
+        HeaderValue::from_str(content_type)
             .context("failed to encode HTTP/2 local response content-type")?,
     );
     headers.insert(
         CONTENT_LENGTH,
-        HeaderValue::from_str(&response.body.len().to_string())
+        HeaderValue::from_str(&body.len().to_string())
             .context("failed to encode HTTP/2 local response content-length")?,
     );
-    let end_stream_with_headers =
-        is_head || h2_status_has_no_body(response.status_code) || response.body.is_empty();
+    let end_stream_with_headers = is_head || h2_status_has_no_body(status_code) || body.is_empty();
     let mut send_stream = send_h2_response_headers(
         respond,
-        response.status_code,
+        status_code,
         &headers,
-        Some(response.body.len() as u64),
+        Some(body.len() as u64),
         end_stream_with_headers,
     )?;
     if !end_stream_with_headers {
-        if let Err(error) = send_stream.send_data(Bytes::from(response.body), true) {
+        if let Err(error) = send_stream.send_data(Bytes::from(body), true) {
             return Err(downstream_h2_stream_cancelled(
                 "sending local response body",
                 error,
@@ -1986,12 +2074,126 @@ fn send_h2_local_response(
     Ok(())
 }
 
-fn send_h2_not_implemented_response(
+async fn send_h2_resource_replacement_response(
+    respond: h2::server::SendResponse<Bytes>,
+    replacement: crate::proxy::resource_replace::ResourceReplacement,
+    is_head: bool,
+) -> Result<()> {
+    let mut file = tokio::fs::File::open(&replacement.path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to open replacement resource for rule `{}`: {}",
+                replacement.rule_id,
+                replacement.path.display()
+            )
+        })?;
+    let content_length = file
+        .metadata()
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect replacement resource for rule `{}`: {}",
+                replacement.rule_id,
+                replacement.path.display()
+            )
+        })?
+        .len();
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        HeaderValue::from_str(&replacement.content_type)
+            .context("failed to encode HTTP/2 resource replacement content-type")?,
+    );
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&content_length.to_string())
+            .context("failed to encode HTTP/2 resource replacement content-length")?,
+    );
+
+    let end_stream_with_headers =
+        is_head || h2_status_has_no_body(replacement.status) || content_length == 0;
+    let mut send_stream = send_h2_response_headers(
+        respond,
+        replacement.status,
+        &headers,
+        Some(content_length),
+        end_stream_with_headers,
+    )?;
+    if end_stream_with_headers {
+        return Ok(());
+    }
+
+    let mut buffer = vec![0u8; DOWNSTREAM_H2_DATA_FRAME_BYTES];
+    let mut bytes_sent = 0u64;
+    while bytes_sent < content_length {
+        let remaining = (content_length - bytes_sent) as usize;
+        let read_limit = remaining.min(buffer.len());
+        let read_count = file.read(&mut buffer[..read_limit]).await?;
+        if read_count == 0 {
+            send_h2_data_with_flow_control(
+                &mut send_stream,
+                Bytes::new(),
+                true,
+                "ending local resource replacement body",
+            )
+            .await?;
+            break;
+        }
+        bytes_sent = bytes_sent.saturating_add(read_count as u64);
+        let end_stream = bytes_sent >= content_length;
+        send_h2_data_with_flow_control(
+            &mut send_stream,
+            Bytes::copy_from_slice(&buffer[..read_count]),
+            end_stream,
+            "sending local resource replacement body",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn send_h2_data_with_flow_control(
+    send_stream: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+    end_stream: bool,
+    operation: &'static str,
+) -> Result<()> {
+    if data.is_empty() {
+        if let Err(error) = send_stream.send_data(data, end_stream) {
+            return Err(downstream_h2_stream_cancelled(operation, error));
+        }
+        return Ok(());
+    }
+
+    while !data.is_empty() {
+        if send_stream.capacity() == 0 {
+            send_stream.reserve_capacity(data.len());
+            match poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(downstream_h2_stream_cancelled(operation, error)),
+                None => anyhow::bail!("downstream HTTP/2 stream closed while reserving capacity"),
+            }
+        }
+
+        let send_len = send_stream.capacity().min(data.len());
+        let remaining = data.split_off(send_len);
+        let is_final_chunk = remaining.is_empty() && end_stream;
+        if let Err(error) = send_stream.send_data(data, is_final_chunk) {
+            return Err(downstream_h2_stream_cancelled(operation, error));
+        }
+        data = remaining;
+    }
+    Ok(())
+}
+
+async fn send_h2_not_implemented_response(
     respond: h2::server::SendResponse<Bytes>,
     message: &'static str,
 ) -> Result<()> {
     let response = MitmLocalResponse::text(501, "Not Implemented", message);
-    send_h2_local_response(respond, response, false)
+    send_h2_local_response(respond, response, false).await
 }
 
 fn reset_h2_stream(mut respond: h2::server::SendResponse<Bytes>, reason: h2::Reason) -> Result<()> {

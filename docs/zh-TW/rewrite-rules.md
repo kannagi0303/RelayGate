@@ -19,14 +19,15 @@ Rules 可以用於：
 
 Runtime rewrite data 是本地私有資料。
 
-常見 runtime folders：
+常見 user rule folders：
 
 ```text
-data/rewrite/
-data/resource_replace/
+data/user/rewrite/
+data/user/patch/
+data/user/resource_replace/
 ```
 
-除非是打算公開的範例，否則不要公開私人 rule files。
+除非你確定要分享那些規則，否則不要公開私人 rule files。
 
 ## HTTPS Sites
 

@@ -9,7 +9,10 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value};
 
-use crate::path_mode::{app_path_mode, AppPathMode};
+use crate::{
+    config::RelayGateConfig,
+    path_mode::{app_path_mode, AppPathMode},
+};
 
 const BUILTIN_EN_US: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -181,27 +184,13 @@ fn load_override_root() -> Result<Option<Value>> {
 }
 
 fn load_config_locale() -> Result<Option<String>> {
-    let Some(path) = config_path()? else {
-        return Ok(None);
-    };
-    let content = match fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    match RelayGateConfig::load_root_locale_default() {
+        Ok(locale) => Ok(locale),
         Err(error) => {
-            tracing::warn!(path = %path.display(), error = %error, "failed to read relaygate.yaml locale");
-            return Ok(None);
+            tracing::warn!(error = %error, "failed to load RelayGate root config locale");
+            Ok(None)
         }
-    };
-    let root = match serde_yaml::from_str::<Value>(&content) {
-        Ok(root) => root,
-        Err(error) => {
-            tracing::warn!(path = %path.display(), error = %error, "failed to parse relaygate.yaml locale");
-            return Ok(None);
-        }
-    };
-    Ok(lookup_path(&root, "locale")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned))
+    }
 }
 
 fn override_path() -> Result<Option<PathBuf>> {
@@ -217,21 +206,6 @@ fn override_path() -> Result<Option<PathBuf>> {
     };
 
     Ok(Some(base.join("relaygate.lang")))
-}
-
-fn config_path() -> Result<Option<PathBuf>> {
-    let base = match app_path_mode() {
-        AppPathMode::Workspace => PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-        AppPathMode::Portable => {
-            let exe =
-                std::env::current_exe().context("failed to resolve current executable path")?;
-            exe.parent()
-                .context("current executable path does not have a parent directory")?
-                .to_path_buf()
-        }
-    };
-
-    Ok(Some(base.join("relaygate.yaml")))
 }
 
 fn lookup_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {

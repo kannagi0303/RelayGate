@@ -271,6 +271,7 @@ where
         }
         RequestBodyKind::Chunked => {
             let mut body = frame.prebuffered_body.clone();
+            let mut temp = vec![0_u8; REQUEST_BODY_READ_BUFFER_BYTES];
             loop {
                 if body.len() > limits.max_chunked_body_bytes
                     || chunked_decoded_len_exceeds(&body, limits.max_chunked_body_bytes)?
@@ -282,7 +283,6 @@ where
                     return Ok(body);
                 }
 
-                let mut temp = vec![0_u8; REQUEST_BODY_READ_BUFFER_BYTES];
                 let read_count = stream.read(&mut temp).await?;
                 if read_count == 0 {
                     bail!("client closed before completing chunked request body");

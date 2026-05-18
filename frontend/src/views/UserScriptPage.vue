@@ -14,10 +14,6 @@ const summary = computed(() => {
 });
 const helpMarkdown = computed(() => String(t("user_script_page.help.markdown")));
 
-function rescan() {
-  void backend.runAction("/backend/actions/user-script/rescan");
-}
-
 function openFolder() {
   void backend.runAction("/backend/actions/user-script/open-folder");
 }
@@ -55,9 +51,6 @@ function toggle(item: any) {
         </div>
       </div>
       <div class="table-inline-form upstream-add-form">
-        <button type="button" class="btn" @click="rescan">
-          {{ t("user_script_page.rescan") }}
-        </button>
         <button type="button" class="btn secondary" @click="openFolder">
           {{ t("user_script_page.open_folder") }}
         </button>
@@ -67,26 +60,25 @@ function toggle(item: any) {
           <tr>
             <th>{{ t("common.status") }}</th>
             <th>{{ t("user_script_page.script_name") }}</th>
-            <th>{{ t("user_script_page.version") }}</th>
-            <th>{{ t("user_script_page.match_scope") }}</th>
+            <th>{{ t("user_script_page.comment") }}</th>
             <th>{{ t("common.action") }}</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="!payload.items?.length">
-            <td colspan="5">{{ t("common.none") }}</td>
+            <td colspan="4">{{ t("common.none") }}</td>
           </tr>
           <tr v-for="item in payload.items" :key="item.filename">
-            <td>
+            <td class="status-cell">
               <span class="status-pill" :class="item.status">{{ item.status_label }}</span>
-              <div v-if="item.error" class="cell-note">{{ item.error }}</div>
             </td>
             <td>
               <strong>{{ item.name || item.filename }}</strong>
               <div class="cell-note mono">{{ item.filename }}</div>
             </td>
-            <td>{{ item.version || t("common.none") }}</td>
-            <td class="mono">{{ item.match_summary || t("common.none") }}</td>
+            <td>
+              <span>{{ item.comment || t("common.none") }}</span>
+            </td>
             <td>
               <button
                 v-if="item.operable"

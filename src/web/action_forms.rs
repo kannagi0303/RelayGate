@@ -40,7 +40,12 @@ pub(crate) struct DnsProfileForm {
 pub(crate) struct DnsRouteForm {
     pub(crate) host_pattern: String,
     pub(crate) profile_id: String,
-    pub(crate) strict: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct DnsFeatureToggleForm {
+    pub(crate) feature: String,
+    pub(crate) enabled: String,
 }
 
 #[derive(Debug)]
@@ -190,14 +195,25 @@ pub(crate) fn parse_dns_route_form_from_body(body: &[u8]) -> anyhow::Result<DnsR
         .remove("profile_id")
         .filter(|value| !value.trim().is_empty())
         .context("missing field `profile_id`")?;
-    let strict = params
-        .remove("strict")
-        .filter(|value| !value.trim().is_empty());
     Ok(DnsRouteForm {
         host_pattern,
         profile_id,
-        strict,
     })
+}
+
+pub(crate) fn parse_dns_feature_toggle_from_body(
+    body: &[u8],
+) -> anyhow::Result<DnsFeatureToggleForm> {
+    let mut params = parse_action_body_params(body)?;
+    let feature = params
+        .remove("feature")
+        .filter(|value| !value.trim().is_empty())
+        .context("missing field `feature`")?;
+    let enabled = params
+        .remove("enabled")
+        .filter(|value| !value.trim().is_empty())
+        .context("missing field `enabled`")?;
+    Ok(DnsFeatureToggleForm { feature, enabled })
 }
 
 pub(crate) fn parse_gateway_mount_form_from_body(body: &[u8]) -> anyhow::Result<GatewayMountForm> {

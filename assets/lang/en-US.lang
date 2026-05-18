@@ -5,6 +5,7 @@ meta:
 
 common:
   none: "None"
+  loading: "Loading"
   yes: "Yes"
   no: "No"
   enabled: "Enabled"
@@ -56,6 +57,7 @@ nav:
   upstreams: "Upstream Proxies"
   upstream_routes: "Upstream Rules"
   dns: "DNS"
+  connection_info: "Connection Info"
   gateway: "Site Mounts"
   patch: "Page Patching"
   render: "Page Reconstruction"
@@ -67,6 +69,9 @@ tray:
   open: "Open Control Panel"
   reload: "Reload"
   exit: "Exit"
+  startup_ready:
+    title: "RelayGate is running"
+    body: "Control panel: {url}"
 
 settings:
   locale:
@@ -76,10 +81,10 @@ settings:
     note: "A hot reload or restart is still required after changes."
   adblock:
     label: "Tracker and Ad Blocking"
-    note: "Choose whether RelayGate disables filtering, follows Brave standard behavior, or uses aggressive first-party filtering."
+    note: "Choose Off, Basic, or Strict. RelayGate handles list and resource maintenance automatically."
   protocol:
     title: "Protocol Priority"
-    apply_note: "Saved values are written to relaygate.yaml. Existing proxy listeners keep their startup config; restart RelayGate before relying on these protocol changes."
+    apply_note: "Saved values are written to data/user/settings.yaml. Existing proxy listeners keep their startup config; restart RelayGate before relying on these protocol changes."
     upstream:
       label: "Upstream Protocol"
       note: "RelayGate to origin. Keep Automatic for best compatibility; guarded H3 is opt-in."
@@ -95,57 +100,26 @@ settings:
 
 adblock:
   mode:
-    off: "Disabled"
-    std: "Standard"
-    agg: "Aggressive"
+    off: "Off"
+    std: "Basic"
+    agg: "Strict"
   page:
-    sub: "RelayGate uses Brave-compatible adblock data with a fixed aggressive mode. Lists and resources sync from Brave defaults in the background. Manual update downloads and reloads them right away."
-    apply_note: "Mode, debugging, and rule hot reload apply to later requests. Reload already-open pages to verify page resources."
+    sub: "RelayGate uses Brave-compatible adblock data. Lists and resources sync in the background; this page only controls filtering strength."
+    apply_note: "Mode changes apply to later requests. Reload already-open pages before verifying page resources."
   feature: "Feature Status"
-  update:
-    label: "Rule Update"
-    note: "Brave default lists and resources sync in the background. Use manual update if you want to refresh them now."
-    brave_note: "RelayGate loads default lists from the Brave list catalog, including hidden default and first-party protection lists. After update, the ad blocking runtime reloads automatically."
-    auto: "Automatic"
-    now: "Update Now"
-  rules:
-    label: "Rule Sources"
-    source: "List Source"
-    tags: "Tags"
-    sub: "Loaded <strong id=\"adblock-rule-count\">0</strong> rules and <strong id=\"adblock-resource-count\">0</strong> resources. RelayGate currently uses aggressive filtering."
-    none: "No rule files were found. Download the default rules first, or place `.txt`, `.list`, `.filter`, or `.filters` files here."
-  resources:
-    label: "Resource Files"
-    source: "Source"
-    none: "No resources.json file was found. Redirect and scriptlet resources are not loaded."
-  troubleshooting:
-    title: "Troubleshooting"
-    disable_fast_path: "Disable MITM fast path"
-    fast_path_note: "When enabled, MITM responses always enter the full body pipeline. Use it to check whether ad blocking, Rewrite, or user scripts were bypassed by the fast path. It may reduce performance and is intended only for debugging."
-    debug_log: "Log ad blocking decisions"
-    debug_log_note: "When enabled, request type, third-party classification, matched rules, and exceptions are written to data/logs/adblock-debug.log. Use it only for short investigations."
-  custom_rules:
-    title: "Custom Rules"
-    note: "Edit {file}, then press hot reload to apply it. custom.txt loads last and is useful when Brave blocks something that the current lists miss."
-    open_folder: "Open Rules Folder"
-    reload: "Hot Reload Ad Blocking Rules"
   help:
     markdown: |
       ### Ad Blocking
 
-      Ad Blocking uses Brave-compatible data and applies to later requests.
+      Ad Blocking uses Brave-compatible data. RelayGate maintains lists and resources in the background.
 
       ### Mode
 
-      You can choose disabled, standard, or aggressive mode. Mode changes affect page resources loaded afterward.
+      - Off: do not apply ad blocking.
+      - Basic: everyday filtering with lower breakage risk.
+      - Strict: more aggressive filtering with a higher chance of breakage.
 
-      ### Rules and Resources
-
-      Rule and resource tables show the currently loaded sources. Custom rules can be placed in the rules folder and hot reloaded.
-
-      ### Troubleshooting
-
-      Fast-path and debug-log options are intended for short investigations.
+      Mode changes affect page resources loaded afterward.
 
 status_page:
   title: "Overview"
@@ -161,6 +135,10 @@ status_page:
   listen: "Listen Address"
   https_auto: "HTTPS handling: automatic"
   resource_usage: "Resource Usage"
+  resource_now: "Now"
+  resource_avg_15m: "15m avg"
+  resource_peak_15m: "15m peak"
+  resource_session_peak: "Session peak"
   baseline: "Baseline"
   runtime: "Runtime"
   loaded: "Loaded"
@@ -191,12 +169,12 @@ status_page:
 
 settings_page:
   title: "Settings"
-  sub: "This version focuses on one setting at a time. Saving writes directly to `relaygate.yaml`."
+  sub: "Root settings are saved to `relaygate.yaml`; module settings are saved under `data/user/`."
   intro: "Connection protocols, CA trust, and RelayGate shutdown actions are managed here. The overview page keeps only live summaries."
   basic: "Basic Settings"
   language:
     title: "Language"
-    body: "The admin language is saved to relaygate.yaml and switches immediately. When no setting exists, the system defaults to English."
+    body: "The admin language is saved to relaygate.yaml and switches immediately. When no root config exists, the system defaults to English."
     option:
       en-US: "English"
       zh-TW: "Traditional Chinese"
@@ -216,7 +194,7 @@ settings_page:
     title: "CA Status and Actions"
     body: "HTTPS handling is fixed to automatic. RelayGate chooses decryption or tunneling by site and rules. This section only manages whether the CA exists and is trusted by Windows."
     file: "CA Files"
-    windows_user_root: "Windows User Root Certificate"
+    windows_user_root: "Windows User Root Trust"
     cert_path: "Certificate Path"
     file_ready: "Ready"
     file_partial: "Incomplete"
@@ -225,8 +203,8 @@ settings_page:
     untrusted: "Untrusted"
     unknown: "Unknown"
     windows_list_title: "RelayGate CAs in Windows"
-    windows_list_note: "This list shows certificates in Windows trusted roots whose subject or issuer contains RelayGate. Remove entries one by one to clean up CAs left by older versions or other folders."
-    no_windows_ca: "No RelayGate CA was found in Windows trusted roots."
+    windows_list_note: "This list shows certificates in the current user Windows trusted Root store whose subject or issuer contains RelayGate. Remove entries one by one to clean up CAs left by older versions or other folders."
+    no_windows_ca: "No RelayGate CA was found in the current user Windows trusted Root store."
     current_ca: "Current CA"
     other_ca: "Other RelayGate CA"
     remove_this: "Remove This"
@@ -280,9 +258,26 @@ traffic_page:
 
       This page does not handle response content rewrite. Page Patching and Page Reconstruction own that work.
 
+connection_info_page:
+  title: "Connection Info"
+  sub: "Shows recent hosts, DNS source, actual address family, and current preference."
+  recent_hosts: "Recent Hosts"
+  max_items: "Display Limit"
+  refresh: "Auto Refresh"
+  host_table: "Recent Connection Observations"
+  dns: "DNS"
+  actual_family: "Actual Family"
+  preference: "Family Preference"
+  prefer_neutral: "Neutral"
+  prefer_ipv4: "Prefer IPv4"
+  prefer_ipv6: "Prefer IPv6"
+  system_dns: "System DNS"
+  none: "No connection observations yet."
+  upstream_dns_unknown: "No DNS cache yet"
+
 upstreams_page:
   title: "Upstream Proxies"
-  sub: "Manage proxy profiles used by upstream routes. This writes to `data/upstreams.yaml` and applies to the running proxy right away."
+  sub: "Manage proxy profiles used by upstream routes. This writes to `data/user/settings.yaml` and applies to the running proxy right away."
   add: "Add Upstream"
   list: "Upstream List"
   address: "Address"
@@ -335,12 +330,12 @@ upstream_routes_page:
 
 dns_page:
   title: "DNS"
-  sub: "Manage RelayGate DNS profiles and host routes. This writes to `data/dns.yaml` and applies to direct HTTP, CONNECT, MITM, and site mount requests."
+  sub: "Manage RelayGate DNS servers. This writes to `data/user/settings.yaml` and applies to direct HTTP, CONNECT, MITM, and site mount requests."
   apply_note: "DNS settings apply to new requests and clear positive and negative caches, so old resolution results are not reused after switching."
   cache: "Cache"
   add_profile: "Add DNS Profile"
   add_route: "Add DNS Route"
-  profiles: "DNS Profiles"
+  profiles: "DNS Servers"
   routes: "DNS Routes"
   profile_id: "Profile ID"
   profile_id_note: "A short ID such as `cloudflare` or `custom-direct`."
@@ -349,85 +344,105 @@ dns_page:
   servers: "Server"
   servers_note: "DNS server as `IP:Port`. When no port is specified, DNS usually uses 53."
   fallback: "Fallback Profiles"
-  fallback_note: "Comma separated profile IDs. Leave empty to fall back to system only when route is not strict."
+  fallback_note: "Comma separated profile IDs. DNS routes do not automatically fall back to system DNS."
   pattern: "Host Pattern"
   pattern_note: "Examples: `example.com`, `www.example.com`, `*.example.com`."
   profile: "Profile"
-  profile_note: "Choose an enabled DNS profile."
+  profile_note: "Choose a configured DNS server."
   strict: "Strict"
   profiles_none: "No DNS profiles yet."
   routes_none: "No DNS routes yet."
 
 dns:
   title: "DNS"
-  subtitle: "Manage DNS profiles and host routes."
+  subtitle: "Manage RelayGate DNS servers."
   status:
     runtime: "DNS Status"
-    profiles: "DNS Profiles"
+    profiles: "DNS Servers"
+    servers: "DNS Servers"
     routes: "Host Routes"
+    cache: "DNS Cache"
     enabled_total: "Enabled / Total"
+    warm_cache: "Warm Cache"
+    observation: "Observation"
+    auto_select: "Auto Select"
+    primary: "Primary"
+    observed_hosts: "{count} observed hosts"
   actions:
-    profiles: "Add DNS Profile"
+    profiles: "Add DNS Server"
     routes: "Add DNS Route"
-    add_profile: "Add Profile"
+    add_profile: "Add Server"
+    add_server: "Add Server"
     add_route: "Add Route"
   fields:
     service: "Service"
     ip: "IP"
     port: "Port"
     pattern: "Host Pattern"
+    strict: "Strict"
   tables:
-    profiles: "DNS Profiles"
+    runtime: "DNS Runtime"
+    profiles: "DNS Servers"
+    servers: "DNS Servers"
     routes: "DNS Routes"
+    health: "DNS Health"
   cols:
+    profile: "Profile"
     service: "Service"
     ip: "IP"
     port: "Port"
     pattern: "Host Pattern"
+    mode: "Mode"
     status: "Status"
     action: "Action"
+    score: "Score"
+    success: "Success"
+    timeout: "Timeout"
+    divergence: "Divergence"
+    latency: "Latency"
+    samples: "Samples"
+    last_seen: "Last Seen"
   placeholders:
     ip: "IP address"
+    pattern: "*.example.com"
+    profile: "Select DNS server"
   empty:
-    profiles: "No DNS profiles yet."
+    profiles: "No DNS servers yet."
+    servers: "No DNS servers yet."
     routes: "No DNS routes yet."
+    health: "No DNS health observations yet."
   generated: "Generated"
   routes:
     missing_profile: "Missing profile"
+    strict: "Strict"
+    fallback: "Fallback"
   help:
     title: "Help"
     markdown: |
-      ### DNS Profiles
+      ### DNS Servers
 
       Enter a DNS server IP to add it to the list. `Port` defaults to `53`.
 
-      - Lookup priority follows the list from top to bottom
-      - If the selected profile fails, RelayGate continues through the current list order
-      - The final fallback is system DNS
+      - Settings are saved to `data/user/settings.yaml`
+      - All DNS servers are enabled by default
+      - Cache, observation, auto-select, and system fallback use RelayGate's internal defaults
+      - The final fallback remains system DNS
 
       ### DNS Routes
 
-      Use routes to choose which DNS profile should be tried first for a specific site.
+      DNS routes make selected host patterns use a specific DNS server. This is useful when one DNS provider returns a policy warning page or an incorrect host for a site.
 
-      - Each route tries the selected profile first
-      - If that profile fails, RelayGate continues through DNS Profiles in order
-      - After all custom profiles fail, the final fallback is system DNS
-
-      ### Host Pattern
-
-      `Host Pattern` accepts these forms:
-
-      - `example.com`: exact match for one domain
-      - `www.example.com`: exact match for one full host name
-      - `*.example.com`: match all subdomains
+      - `Host Pattern` accepts `example.com` or `*.example.com`
+      - Host patterns placed in DNS Routes use only the selected DNS server and do not fall back to other DNS servers
+      - Delete a route to disable that rule
 
 gateway_page:
   title: "Site Mounts"
   sub: "Mount a remote site under a local URL path. RelayGate fetches the remote site through the normal pipeline and rewrites links back under the mount path."
   add: "Add Site Mount"
   list: "Site Mount List"
-  mount_path: "Mount Path"
-  mount_path_note: "Local path on the proxy listener. Example: `/site/`."
+  mount_path: "Mount ID"
+  mount_path_note: "Enter one segment such as `site`; RelayGate exposes it as `/site/`."
   target: "Target Base URL"
   target_note: "Remote site base URL. Example: `https://example.com`."
   upstream: "Upstream"
@@ -442,7 +457,7 @@ gateway_page:
     markdown: |
       ### Site Mounts
 
-      A site mount exposes a remote site under a local path such as `/site/`.
+      A site mount exposes a remote site under a generated local path such as `/site/`.
 
       ### Target URL
 
@@ -514,11 +529,10 @@ resource_replace_page:
 
 user_script_page:
   title: "User Scripts"
-  sub: "Manage local `.user.js` files under `data/user_script/`. Enabled scripts affect future matching HTML documents only."
-  rescan: "Rescan"
+  sub: "Manage local `.user.js` files under `data/user/user_script/`. Enabled scripts affect future matching HTML documents only."
   open_folder: "Open Script Folder"
-  apply_note: "Enable and disable actions rescan automatically and apply hot. If files were edited outside RelayGate, press rescan."
   script_name: "Script Name"
+  comment: "Comment"
   version: "Version"
   match_scope: "Match Scope"
   list: "Script List"
@@ -536,7 +550,7 @@ user_script_page:
     error: "Error"
   intro:
     title: "Feature Introduction"
-    body: "User Script v1 scans local files under `data/user_script/`, records enabled filenames in `enabled.yaml`, and injects matching scripts into mutable HTML document responses. It is compatible support, not full userscript-manager parity."
+    body: "User Script v1 indexes local files under `data/user/user_script/`, records enabled state and match metadata in `data/state/user_script.bin`, and injects matching scripts into mutable HTML document responses. It is compatible support, not full userscript-manager parity."
   help:
     markdown: |
       ### User Scripts
@@ -549,7 +563,7 @@ user_script_page:
 
       ### Apply Timing
 
-      Enable, disable, and rescan actions apply to pages loaded afterward.
+      Enable, disable, and file changes apply to pages loaded afterward.
 
 
 ca:
@@ -562,7 +576,7 @@ ca:
     note: "Path to the current RelayGate CA private key."
   trust:
     label: "Windows Trust"
-    note: "Whether the current user's Root store still trusts this CA."
+    note: "Whether the current user Windows trusted Root store contains this CA."
     install: "Install CA to Windows"
     remove: "Remove CA Trust"
 
@@ -587,7 +601,7 @@ backend:
     no_cert: "No local CA certificate file was found. Trust cannot be removed."
     no_diag: "No extra diagnostics are available"
     kept: "RelayGate CA trust was removed from Windows. Local CA files were kept."
-    other_removed: "The selected RelayGate CA was removed from Windows trusted roots."
+    other_removed: "The selected RelayGate CA was removed from the current user Windows trusted Root store."
     thumb_fail: "Failed to read the local CA thumbprint: {stderr}"
     still:
       diag: "The CA still exists in: {path}; diagnostics: {details}"

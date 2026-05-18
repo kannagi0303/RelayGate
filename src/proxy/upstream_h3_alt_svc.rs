@@ -6,6 +6,7 @@ use std::{
 
 const MAX_RECENT_H3_ALT_SVC_AUTHORITIES: usize = 16;
 const MAX_H3_CANDIDATE_CACHE_ENTRIES: usize = 16;
+const DEFAULT_H3_ALT_SVC_MA_SECONDS: u64 = 86_400;
 
 /// RelayGate-owned snapshot of an upstream HTTP/3 candidate learned from Alt-Svc.
 ///
@@ -63,7 +64,19 @@ fn upstream_h3_alt_svc_observation_state() -> &'static Mutex<UpstreamH3AltSvcObs
 /// attempts QUIC by itself.
 pub(crate) fn record_alt_svc(authority: &str, headers: &reqwest::header::HeaderMap) {
     let alt_svc = collect_alt_svc_header_values(headers);
-    if alt_svc.is_empty() || !alt_svc_advertises_h3(&alt_svc) {
+    if alt_svc.is_empty() {
+        return;
+    }
+
+    if alt_svc_clears_alternatives(&alt_svc) {
+        let Ok(mut state) = upstream_h3_alt_svc_observation_state().lock() else {
+            return;
+        };
+        remove_h3_candidate_for_authority(&mut state, authority);
+        return;
+    }
+
+    if !alt_svc_advertises_h3(&alt_svc) {
         return;
     }
 
@@ -159,6 +172,12 @@ fn collect_alt_svc_header_values(headers: &reqwest::header::HeaderMap) -> String
         .join(" | ")
 }
 
+fn alt_svc_clears_alternatives(alt_svc: &str) -> bool {
+    alt_svc
+        .split(|ch| ch == ',' || ch == '|')
+        .any(|entry| entry.trim().eq_ignore_ascii_case("clear"))
+}
+
 fn alt_svc_advertises_h3(alt_svc: &str) -> bool {
     alt_svc.split(',').any(|entry| {
         let token = entry
@@ -221,22 +240,16 @@ fn update_h3_candidate_cache(
     observed_at: &str,
     now: Option<u64>,
 ) {
-    if let Some(position) = state
-        .h3_candidates
-        .iter()
-        .position(|item| item.authority.eq_ignore_ascii_case(authority))
-    {
-        state.h3_candidates.remove(position);
-    }
+    remove_h3_candidate_for_authority(state, authority);
 
     if candidate.ma_seconds == Some(0) {
         return;
     }
 
-    let expires_at_unix = match (now, candidate.ma_seconds) {
-        (Some(now), Some(ma_seconds)) => Some(now.saturating_add(ma_seconds)),
-        _ => None,
-    };
+    let ttl_seconds = candidate
+        .ma_seconds
+        .unwrap_or(DEFAULT_H3_ALT_SVC_MA_SECONDS);
+    let expires_at_unix = now.map(|now| now.saturating_add(ttl_seconds));
 
     state.h3_candidates.push_front(UpstreamHttp3Candidate {
         authority: authority.to_string(),
@@ -251,6 +264,15 @@ fn update_h3_candidate_cache(
     while state.h3_candidates.len() > MAX_H3_CANDIDATE_CACHE_ENTRIES {
         state.h3_candidates.pop_back();
     }
+}
+
+fn remove_h3_candidate_for_authority(
+    state: &mut UpstreamH3AltSvcObservationState,
+    authority: &str,
+) {
+    state
+        .h3_candidates
+        .retain(|candidate| !candidate.authority.eq_ignore_ascii_case(authority));
 }
 
 fn prune_expired_h3_candidates(state: &mut UpstreamH3AltSvcObservationState, now: Option<u64>) {
@@ -321,6 +343,29 @@ mod tests {
         );
 
         assert!(active_candidate_for_authority("remove.example").is_none());
+    }
+
+    #[test]
+    fn clear_removes_existing_candidate() {
+        record_alt_svc(
+            "clear.example",
+            &headers_with_alt_svc(r#"h3=":443"; ma=120"#),
+        );
+        assert!(active_candidate_for_authority("clear.example").is_some());
+
+        record_alt_svc("clear.example", &headers_with_alt_svc("clear"));
+
+        assert!(active_candidate_for_authority("clear.example").is_none());
+    }
+
+    #[test]
+    fn missing_ma_uses_default_expiry_without_faking_ma() {
+        record_alt_svc("missing-ma.example", &headers_with_alt_svc("h3=\":443\""));
+
+        let candidate =
+            active_candidate_for_authority("missing-ma.example").expect("active candidate");
+        assert_eq!(candidate.ma_seconds, None);
+        assert!(candidate.expires_at_unix.is_some());
     }
 
     #[test]

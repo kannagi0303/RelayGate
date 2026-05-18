@@ -1,18 +1,22 @@
+mod control_panel_open;
+mod icon;
+mod startup_notification;
+
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
     thread,
+    time::Duration,
 };
 
 use anyhow::Result;
-use ico::IconDir;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
-    Icon, MouseButton, TrayIconBuilder, TrayIconEvent,
+    MouseButton, TrayIconBuilder, TrayIconEvent,
 };
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -20,6 +24,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::{config::RelayGateConfig, lang};
+
+use self::{
+    control_panel_open::{browser_open_address, ControlPanelOpenGuard},
+    icon::build_default_icon,
+    startup_notification::{show_startup_notification, StartupNotification},
+};
 
 /// Abstraction layer for tray control.
 /// This keeps the app layer stable if the tray crate or platform changes later.
@@ -29,8 +39,6 @@ pub trait TrayController {
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrayCommand {
-    OpenControlPanel,
-    Reload,
     Exit,
 }
 
@@ -47,26 +55,54 @@ pub struct TrayHandle {
     /// Used to tell the tray thread to stop.
     shutdown_flag: Arc<AtomicBool>,
     thread_id: Arc<AtomicU32>,
+    tray_tx: std::sync::mpsc::Sender<TrayThreadCommand>,
 }
 
 impl TrayHandle {
     pub fn shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::SeqCst);
+        self.wake_tray_thread();
+        debug!("tray handle shutdown requested");
+    }
+
+    fn wake_tray_thread(&self) {
         let thread_id = self.thread_id.load(Ordering::SeqCst);
         if thread_id != 0 {
             unsafe {
                 PostThreadMessageW(thread_id, WM_APP + 1, 0, 0);
             }
         }
-        debug!("tray handle shutdown requested");
     }
+
+    pub fn notify_startup_ready(&self, listen: &str) {
+        let notification = StartupNotification {
+            title: lang::text("tray.startup_ready.title"),
+            body: lang::format(
+                "tray.startup_ready.body",
+                &[("url", format!("http://{}/", browser_open_address(listen)))],
+            ),
+        };
+        if let Err(error) = self
+            .tray_tx
+            .send(TrayThreadCommand::ShowStartupNotification(notification))
+        {
+            debug!(error = %error, "startup tray notification skipped because tray thread is gone");
+        } else {
+            self.wake_tray_thread();
+        }
+    }
+}
+
+#[derive(Debug)]
+enum TrayThreadCommand {
+    ShowStartupNotification(StartupNotification),
 }
 
 /// Windows tray icon implementation.
 ///
 /// The first version focuses on:
 /// - showing a tray icon
-/// - providing Exit in the context menu
+/// - providing open and Exit in the context menu
 /// - sending Exit back to the app to trigger shutdown
 pub struct SystemTray {
     config: Arc<RelayGateConfig>,
@@ -85,10 +121,6 @@ impl SystemTray {
                 label: lang::text("tray.open"),
             },
             TrayMenuEntry {
-                id: "reload",
-                label: lang::text("tray.reload"),
-            },
-            TrayMenuEntry {
                 id: "exit",
                 label: lang::text("tray.exit"),
             },
@@ -100,14 +132,21 @@ impl TrayController for SystemTray {
     fn start(&self, command_tx: mpsc::UnboundedSender<TrayCommand>) -> Result<TrayHandle> {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let thread_id = Arc::new(AtomicU32::new(0));
+        let (tray_tx, tray_rx) = std::sync::mpsc::channel::<TrayThreadCommand>();
         let thread_shutdown_flag = shutdown_flag.clone();
         let thread_id_flag = thread_id.clone();
         let app_name = self.config.app.name.clone();
+        let web_listen = self.config.proxy.listen.clone();
 
         thread::spawn(move || {
-            if let Err(error) =
-                run_tray_thread(app_name, thread_shutdown_flag, thread_id_flag, command_tx)
-            {
+            if let Err(error) = run_tray_thread(
+                app_name,
+                web_listen,
+                thread_shutdown_flag,
+                thread_id_flag,
+                command_tx,
+                tray_rx,
+            ) {
                 warn!(error = %error, "tray thread exited with error");
             }
         });
@@ -117,25 +156,26 @@ impl TrayController for SystemTray {
         Ok(TrayHandle {
             shutdown_flag,
             thread_id,
+            tray_tx,
         })
     }
 }
 
 fn run_tray_thread(
     app_name: String,
+    web_listen: String,
     shutdown_flag: Arc<AtomicBool>,
     thread_id: Arc<AtomicU32>,
     command_tx: mpsc::UnboundedSender<TrayCommand>,
+    tray_rx: std::sync::mpsc::Receiver<TrayThreadCommand>,
 ) -> Result<()> {
-    // Build the minimum tray icon and context menu here.
-    // Use the bundled icon data directly instead of depending on external image files.
     let menu = Menu::new();
     let open_item = MenuItem::new(&lang::text("tray.open"), true, None);
-    let reload_item = MenuItem::new(&lang::text("tray.reload"), true, None);
     let exit_item = MenuItem::new(&lang::text("tray.exit"), true, None);
     menu.append(&open_item)?;
-    menu.append(&reload_item)?;
     menu.append(&exit_item)?;
+
+    let open_guard = ControlPanelOpenGuard::new(web_listen.clone(), Duration::from_millis(800));
 
     let icon = build_default_icon()?;
     let _tray_icon = TrayIconBuilder::new()
@@ -168,42 +208,53 @@ fn run_tray_thread(
             }
         }
 
-        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::DoubleClick { button, .. } = event {
-                if button == MouseButton::Left {
-                    let _ = command_tx.send(TrayCommand::OpenControlPanel);
-                }
-            }
-        }
-
-        while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == open_item.id() {
-                let _ = command_tx.send(TrayCommand::OpenControlPanel);
-            } else if event.id == reload_item.id() {
-                let _ = command_tx.send(TrayCommand::Reload);
-            } else if event.id == exit_item.id() {
-                let _ = command_tx.send(TrayCommand::Exit);
-                return Ok(());
-            }
+        drain_tray_thread_commands(&tray_rx);
+        handle_tray_icon_events(&open_guard);
+        if handle_tray_menu_events(&open_guard, &open_item, &exit_item, &command_tx)? {
+            break;
         }
     }
 
     Ok(())
 }
 
-fn build_default_icon() -> Result<Icon> {
-    let bytes = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/relaygate.ico"));
-    let icon_dir = IconDir::read(std::io::Cursor::new(bytes.as_slice()))?;
-    let entry = icon_dir
-        .entries()
-        .iter()
-        .max_by_key(|entry| entry.width())
-        .ok_or_else(|| anyhow::anyhow!("icon file does not contain any entries"))?;
-    let image = entry.decode()?;
+fn drain_tray_thread_commands(tray_rx: &std::sync::mpsc::Receiver<TrayThreadCommand>) {
+    while let Ok(command) = tray_rx.try_recv() {
+        match command {
+            TrayThreadCommand::ShowStartupNotification(notification) => {
+                thread::spawn(move || {
+                    if let Err(error) = show_startup_notification(notification) {
+                        warn!(error = %error, "startup tray notification failed");
+                    }
+                });
+            }
+        }
+    }
+}
 
-    Ok(Icon::from_rgba(
-        image.rgba_data().to_vec(),
-        image.width(),
-        image.height(),
-    )?)
+fn handle_tray_icon_events(open_guard: &ControlPanelOpenGuard) {
+    while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+        if let TrayIconEvent::DoubleClick { button, .. } = event {
+            if button == MouseButton::Left {
+                open_guard.request_open("tray-double-click");
+            }
+        }
+    }
+}
+
+fn handle_tray_menu_events(
+    open_guard: &ControlPanelOpenGuard,
+    open_item: &MenuItem,
+    exit_item: &MenuItem,
+    command_tx: &mpsc::UnboundedSender<TrayCommand>,
+) -> Result<bool> {
+    while let Ok(event) = MenuEvent::receiver().try_recv() {
+        if event.id == open_item.id() {
+            open_guard.request_open("tray-menu");
+        } else if event.id == exit_item.id() {
+            let _ = command_tx.send(TrayCommand::Exit);
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }

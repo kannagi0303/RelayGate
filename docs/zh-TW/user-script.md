@@ -19,7 +19,7 @@ Runtime User Script files 是本地資料。
 常見資料夾：
 
 ```text
-data/user_script/
+data/user/user_script/
 ```
 
 使用前應先檢查 scripts。

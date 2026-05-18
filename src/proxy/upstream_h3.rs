@@ -361,6 +361,16 @@ fn upstream_http3_active_buffered_failure_cooldown_state(
     STATE.get_or_init(|| Mutex::new(UpstreamHttp3ActiveBufferedFailureCooldownState::default()))
 }
 
+fn prune_active_buffered_failure_cooldown_locked(
+    state: &mut UpstreamHttp3ActiveBufferedFailureCooldownState,
+    now: u64,
+) {
+    state.last_failure_by_authority.retain(|_, entry| {
+        now.saturating_sub(entry.last_failure_at_unix)
+            < DEFAULT_H3_ACTIVE_BUFFERED_FAILURE_COOLDOWN_SECS
+    });
+}
+
 pub(crate) fn http3_active_buffered_failure_cooldown_snapshot(
 ) -> UpstreamHttp3ActiveBufferedFailureCooldownSnapshot {
     let now = unix_seconds_now_u64();
@@ -371,10 +381,7 @@ pub(crate) fn http3_active_buffered_failure_cooldown_snapshot(
         };
     };
 
-    state.last_failure_by_authority.retain(|_, entry| {
-        now.saturating_sub(entry.last_failure_at_unix)
-            < DEFAULT_H3_ACTIVE_BUFFERED_FAILURE_COOLDOWN_SECS
-    });
+    prune_active_buffered_failure_cooldown_locked(&mut state, now);
 
     let mut active_entries = state
         .last_failure_by_authority
@@ -412,6 +419,8 @@ pub(crate) fn reserve_http3_active_buffered_authority_slot(
         return Ok(());
     };
 
+    prune_active_buffered_failure_cooldown_locked(&mut state, now);
+
     let Some(entry) = state.last_failure_by_authority.get(&authority_key).cloned() else {
         return Ok(());
     };
@@ -448,6 +457,8 @@ pub(crate) fn record_http3_active_buffered_authority_failure(
     let Ok(mut state) = upstream_http3_active_buffered_failure_cooldown_state().lock() else {
         return;
     };
+
+    prune_active_buffered_failure_cooldown_locked(&mut state, unix_seconds_now_u64());
 
     state.last_failure_by_authority.insert(
         authority_key,
@@ -608,6 +619,16 @@ fn upstream_http3_active_streaming_failure_cooldown_state(
     STATE.get_or_init(|| Mutex::new(UpstreamHttp3ActiveStreamingFailureCooldownState::default()))
 }
 
+fn prune_active_streaming_failure_cooldown_locked(
+    state: &mut UpstreamHttp3ActiveStreamingFailureCooldownState,
+    now: u64,
+) {
+    state.last_failure_by_authority.retain(|_, entry| {
+        now.saturating_sub(entry.last_failure_at_unix)
+            < DEFAULT_H3_ACTIVE_STREAMING_FAILURE_COOLDOWN_SECS
+    });
+}
+
 pub(crate) fn reserve_http3_active_streaming_authority_slot(
     authority: &str,
 ) -> Result<(), UpstreamBackendError> {
@@ -620,6 +641,8 @@ pub(crate) fn reserve_http3_active_streaming_authority_slot(
     let Ok(mut state) = upstream_http3_active_streaming_failure_cooldown_state().lock() else {
         return Ok(());
     };
+
+    prune_active_streaming_failure_cooldown_locked(&mut state, now);
 
     let Some(entry) = state.last_failure_by_authority.get(&authority_key).cloned() else {
         return Ok(());
@@ -656,6 +679,8 @@ pub(crate) fn record_http3_active_streaming_authority_failure(
         return;
     };
 
+    prune_active_streaming_failure_cooldown_locked(&mut state, unix_seconds_now_u64());
+
     state.last_failure_by_authority.insert(
         authority_key,
         UpstreamHttp3ActiveStreamingFailureEntry {
@@ -664,6 +689,19 @@ pub(crate) fn record_http3_active_streaming_authority_failure(
             last_failure_at_unix: unix_seconds_now_u64(),
         },
     );
+}
+
+pub(crate) fn clear_http3_active_streaming_authority_failure(authority: &str) {
+    let authority_key = normalize_h3_authority_key(authority);
+    if authority_key.is_empty() {
+        return;
+    }
+
+    let Ok(mut state) = upstream_http3_active_streaming_failure_cooldown_state().lock() else {
+        return;
+    };
+
+    state.last_failure_by_authority.remove(&authority_key);
 }
 
 pub(crate) fn record_http3_active_streaming_writer_fallback(
@@ -713,6 +751,15 @@ fn upstream_http3_handshake_probe_gate_state(
     STATE.get_or_init(|| Mutex::new(UpstreamHttp3HandshakeProbeGateState::default()))
 }
 
+fn prune_http3_handshake_probe_gate_locked(
+    state: &mut UpstreamHttp3HandshakeProbeGateState,
+    now: u64,
+) {
+    state.last_probe_by_authority.retain(|_, last_probe| {
+        now.saturating_sub(*last_probe) < DEFAULT_H3_HANDSHAKE_PROBE_COOLDOWN_SECS
+    });
+}
+
 pub(crate) const fn h3_handshake_probe_cooldown_seconds() -> u64 {
     DEFAULT_H3_HANDSHAKE_PROBE_COOLDOWN_SECS
 }
@@ -735,6 +782,8 @@ pub(crate) fn reserve_http3_handshake_probe_slot(
     if authority_key.is_empty() {
         return Ok(());
     }
+
+    prune_http3_handshake_probe_gate_locked(&mut state, now);
 
     if let Some(last_probe) = state.last_probe_by_authority.get(&authority_key).copied() {
         let elapsed = now.saturating_sub(last_probe);
@@ -1603,5 +1652,87 @@ mod tests {
         assert_eq!(outcome.fallback_label(), "reqwest auto");
         assert_eq!(outcome.fallback_error_code(), Some("no_candidate"));
         assert!(outcome.response.is_none());
+    }
+
+    #[test]
+    fn pruning_removes_expired_h3_runtime_cooldowns() {
+        let now = 1_000_u64;
+
+        let mut buffered = UpstreamHttp3ActiveBufferedFailureCooldownState::default();
+        buffered.last_failure_by_authority.insert(
+            "old-buffered.example".to_string(),
+            UpstreamHttp3ActiveBufferedFailureEntry {
+                reason_code: "h3_error".to_string(),
+                reason_detail: "old".to_string(),
+                last_failure_at_unix: now - DEFAULT_H3_ACTIVE_BUFFERED_FAILURE_COOLDOWN_SECS,
+            },
+        );
+        buffered.last_failure_by_authority.insert(
+            "fresh-buffered.example".to_string(),
+            UpstreamHttp3ActiveBufferedFailureEntry {
+                reason_code: "h3_error".to_string(),
+                reason_detail: "fresh".to_string(),
+                last_failure_at_unix: now - 1,
+            },
+        );
+        prune_active_buffered_failure_cooldown_locked(&mut buffered, now);
+        assert!(!buffered
+            .last_failure_by_authority
+            .contains_key("old-buffered.example"));
+        assert!(buffered
+            .last_failure_by_authority
+            .contains_key("fresh-buffered.example"));
+
+        let mut streaming = UpstreamHttp3ActiveStreamingFailureCooldownState::default();
+        streaming.last_failure_by_authority.insert(
+            "old-streaming.example".to_string(),
+            UpstreamHttp3ActiveStreamingFailureEntry {
+                reason_code: "h3_error".to_string(),
+                reason_detail: "old".to_string(),
+                last_failure_at_unix: now - DEFAULT_H3_ACTIVE_STREAMING_FAILURE_COOLDOWN_SECS,
+            },
+        );
+        streaming.last_failure_by_authority.insert(
+            "fresh-streaming.example".to_string(),
+            UpstreamHttp3ActiveStreamingFailureEntry {
+                reason_code: "h3_error".to_string(),
+                reason_detail: "fresh".to_string(),
+                last_failure_at_unix: now - 1,
+            },
+        );
+        prune_active_streaming_failure_cooldown_locked(&mut streaming, now);
+        assert!(!streaming
+            .last_failure_by_authority
+            .contains_key("old-streaming.example"));
+        assert!(streaming
+            .last_failure_by_authority
+            .contains_key("fresh-streaming.example"));
+
+        let mut probe = UpstreamHttp3HandshakeProbeGateState::default();
+        probe.last_probe_by_authority.insert(
+            "old-probe.example".to_string(),
+            now - DEFAULT_H3_HANDSHAKE_PROBE_COOLDOWN_SECS,
+        );
+        probe
+            .last_probe_by_authority
+            .insert("fresh-probe.example".to_string(), now - 1);
+        prune_http3_handshake_probe_gate_locked(&mut probe, now);
+        assert!(!probe
+            .last_probe_by_authority
+            .contains_key("old-probe.example"));
+        assert!(probe
+            .last_probe_by_authority
+            .contains_key("fresh-probe.example"));
+    }
+
+    #[test]
+    fn clear_streaming_authority_failure_removes_cooldown() {
+        let authority = "streaming-clear-cooldown.example";
+
+        record_http3_active_streaming_authority_failure(authority, "h3_error", "test failure");
+        assert!(reserve_http3_active_streaming_authority_slot(authority).is_err());
+
+        clear_http3_active_streaming_authority_failure(authority);
+        assert!(reserve_http3_active_streaming_authority_slot(authority).is_ok());
     }
 }

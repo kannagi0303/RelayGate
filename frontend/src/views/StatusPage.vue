@@ -55,11 +55,16 @@ const formatBytes = (bytes: unknown) => {
   return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 };
 
+const hasFiniteNumber = (value: unknown) => Number.isFinite(Number(value));
+
 const formatCpu = (value: unknown) => {
   const cpu = Number(value);
   if (!Number.isFinite(cpu)) return t("status_page.sampling");
   return `${cpu.toFixed(cpu < 10 ? 1 : 0)}%`;
 };
+
+const formatResourcePair = (cpu: unknown, memory: unknown) =>
+  `${formatCpu(cpu)} / ${formatBytes(memory)}`;
 
 function syncUptime(seconds: unknown) {
   const next = Number(seconds ?? 0);
@@ -99,10 +104,40 @@ const listenParts = computed(() => {
   return { host: match[1], port: match[2], full: `${match[1]}:${match[2]}` };
 });
 
+const resourcePrimary = computed(() => {
+  if (hasFiniteNumber(processInfo.value.avg_cpu_percent_15m)) {
+    return `${formatCpu(processInfo.value.avg_cpu_percent_15m)} · ${t("status_page.resource_avg_15m")}`;
+  }
+  return formatCpu(processInfo.value.cpu_percent);
+});
+
 const processSummary = computed(() => [
+  {
+    label: t("status_page.resource_now"),
+    value: formatResourcePair(processInfo.value.cpu_percent, processInfo.value.memory_bytes),
+  },
+  {
+    label: t("status_page.resource_avg_15m"),
+    value: formatResourcePair(
+      processInfo.value.avg_cpu_percent_15m,
+      processInfo.value.avg_memory_bytes_15m,
+    ),
+  },
+  {
+    label: t("status_page.resource_peak_15m"),
+    value: formatResourcePair(
+      processInfo.value.peak_cpu_percent_15m,
+      processInfo.value.peak_memory_bytes_15m,
+    ),
+  },
+  {
+    label: t("status_page.resource_session_peak"),
+    value: formatResourcePair(
+      processInfo.value.session_peak_cpu_percent,
+      processInfo.value.session_peak_memory_bytes,
+    ),
+  },
   { label: "PID", value: dash(processInfo.value.pid) },
-  { label: "CPU", value: formatCpu(processInfo.value.cpu_percent) },
-  { label: "RAM", value: formatBytes(processInfo.value.memory_bytes) },
 ]);
 
 const dnsProfiles = computed(() => dns.value.profiles ?? []);
@@ -188,7 +223,7 @@ const systemSummary = computed(() => [
       </div>
       <div class="stat-card resource-card">
         <span>{{ t("status_page.resource_usage") }}</span>
-        <strong class="mono">{{ formatCpu(processInfo.cpu_percent) }}</strong>
+        <strong class="mono">{{ resourcePrimary }}</strong>
         <small>
           <span v-for="item in processSummary" :key="item.label">
             {{ item.label }} {{ item.value }}
@@ -294,7 +329,7 @@ const systemSummary = computed(() => [
             <td class="mono">{{ item.id }}</td>
             <td class="mono">{{ item.address }}</td>
             <td>{{ item.enabled ? t("common.enabled") : t("common.disabled") }}</td>
-            <td>{{ upstreamRoutes.items?.filter((route) => route.upstream_id === item.id).length ?? 0 }}</td>
+            <td>{{ upstreamRoutes.items?.filter((route: any) => route.upstream_id === item.id).length ?? 0 }}</td>
             <td>{{ t("status_page.passive_stats_pending") }}</td>
           </tr>
         </tbody>

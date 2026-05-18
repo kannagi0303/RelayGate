@@ -11,6 +11,7 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, CONTE
 use tokio::{
     io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
+    sync::oneshot,
     time,
 };
 use tracing::{debug, info, warn};
@@ -30,6 +31,7 @@ use crate::{
         connect::{handle_connect_tunnel, ConnectTunnelState},
         control_panel_proxy::{handle_control_panel_proxy, is_control_panel_request},
         downstream_status,
+        gateway_mount::{self, SharedGatewayMountRegistry},
         happy_eyeballs::{connect_happy_eyeballs, resolve_target_addresses},
         header_hop::{connection_header_tokens, should_skip_response_header, upgrade_header_value},
         http_forward::{
@@ -42,13 +44,17 @@ use crate::{
             find_response_header_end, parse_http_request, parse_http_response_head,
             read_http_response_head, ParsedHttpRequest,
         },
-        local_response::{build_buffered_response_bytes, simple_response_bytes},
+        local_response::{
+            build_buffered_response_bytes, simple_response_bytes,
+            write_resource_replacement_response,
+        },
         mitm::MitmEngine,
         mount_forward::{
             apply_response_effects_with_metadata_cleanup, apply_site_specific_gateway_rewrite,
             build_gateway_http_client, build_gateway_request_headers, header_pairs_from_reqwest,
             log_response_body, passthrough_response_headers,
-            relaygate_body_pipeline_accept_encoding, should_forward_gateway_header,
+            relaygate_body_pipeline_accept_encoding, shared_gateway_http_client_cache,
+            should_forward_gateway_header,
         },
         outbound::{prepare_outbound_request, OutboundRequestDecision, OutboundRequestState},
         pipeline::{PipelineDecision, PipelineRoute},
@@ -90,6 +96,7 @@ pub(crate) struct ProxyServer {
     config: Arc<RelayGateConfig>,
     rules: RuleEngine,
     upstreams: SharedUpstreamRegistry,
+    gateway_mounts: SharedGatewayMountRegistry,
     resource_replace_registry: SharedResourceReplaceRegistry,
     rewrite_registry: SharedRewriteRegistry,
     adblock_state: SharedAdblockState,
@@ -98,6 +105,8 @@ pub(crate) struct ProxyServer {
     user_script_registry: SharedUserScriptRegistry,
     protocol_runtime: ProtocolRuntimeConfig,
     control_panel_app: axum::Router,
+    gateway_http_client_cache: crate::proxy::mount_forward::SharedGatewayHttpClientCache,
+    startup_ready_tx: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Clone)]
@@ -106,6 +115,7 @@ struct ProxyAppState {
     mitm: MitmEngine,
     rules: RuleEngine,
     upstreams: SharedUpstreamRegistry,
+    gateway_mounts: SharedGatewayMountRegistry,
     resource_replace_registry: SharedResourceReplaceRegistry,
     rewrite_registry: SharedRewriteRegistry,
     adblock_state: SharedAdblockState,
@@ -113,6 +123,7 @@ struct ProxyAppState {
     dns_resolver: SharedDnsResolver,
     user_script_registry: SharedUserScriptRegistry,
     control_panel_app: axum::Router,
+    gateway_http_client_cache: crate::proxy::mount_forward::SharedGatewayHttpClientCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,10 +215,12 @@ impl ProxyServer {
         adblock_state: SharedAdblockState,
         traffic_state: SharedTrafficState,
         upstreams: SharedUpstreamRegistry,
+        gateway_mounts: SharedGatewayMountRegistry,
         dns_resolver: SharedDnsResolver,
         user_script_registry: SharedUserScriptRegistry,
         protocol_runtime: ProtocolRuntimeConfig,
         runtime: AppRuntime,
+        startup_ready_tx: Option<oneshot::Sender<()>>,
     ) -> Self {
         let rules = RuleEngine::from_config(&config.rules);
 
@@ -215,6 +228,7 @@ impl ProxyServer {
             config: config.clone(),
             rules,
             upstreams: upstreams.clone(),
+            gateway_mounts: gateway_mounts.clone(),
             resource_replace_registry: resource_replace_registry.clone(),
             rewrite_registry: rewrite_registry.clone(),
             adblock_state: adblock_state.clone(),
@@ -222,6 +236,8 @@ impl ProxyServer {
             dns_resolver: dns_resolver.clone(),
             user_script_registry: user_script_registry.clone(),
             protocol_runtime: protocol_runtime.clone(),
+            gateway_http_client_cache: shared_gateway_http_client_cache(),
+            startup_ready_tx,
             control_panel_app: build_control_panel_app(build_web_state(
                 config.clone(),
                 rewrite_registry.clone(),
@@ -229,6 +245,7 @@ impl ProxyServer {
                 adblock_state.clone(),
                 traffic_state,
                 upstreams.clone(),
+                gateway_mounts.clone(),
                 dns_resolver.clone(),
                 user_script_registry.clone(),
                 protocol_runtime.clone(),
@@ -242,9 +259,9 @@ impl ProxyServer {
             format!("invalid proxy listen address: {}", self.config.proxy.listen)
         })?;
 
-        info!(listen = %addr, "proxy ready");
         self.log_bootstrap_summary();
         self.demo_rule_flow();
+        let startup_ready_tx = self.startup_ready_tx;
 
         let state = ProxyAppState {
             config: self.config.clone(),
@@ -262,6 +279,7 @@ impl ProxyServer {
             ),
             rules: self.rules,
             upstreams: self.upstreams,
+            gateway_mounts: self.gateway_mounts,
             resource_replace_registry: self.resource_replace_registry,
             rewrite_registry: self.rewrite_registry,
             adblock_state: self.adblock_state,
@@ -269,9 +287,14 @@ impl ProxyServer {
             dns_resolver: self.dns_resolver,
             user_script_registry: self.user_script_registry,
             control_panel_app: self.control_panel_app,
+            gateway_http_client_cache: self.gateway_http_client_cache,
         };
 
         let listener = TcpListener::bind(addr).await?;
+        info!(listen = %addr, "proxy ready");
+        if let Some(startup_ready_tx) = startup_ready_tx {
+            let _ = startup_ready_tx.send(());
+        }
 
         loop {
             let (stream, peer_addr) = listener.accept().await?;
@@ -479,7 +502,7 @@ async fn proxy_request(
         return Ok(ClientConnectionAction::Close);
     }
 
-    if let Some(mount) = find_gateway_mount(state.config.as_ref(), &request.uri_text) {
+    if let Some(mount) = find_gateway_mount(&state.gateway_mounts, &request.uri_text) {
         client_context.reusable_upstream.take();
         let Some(request) = buffer_request_for_existing_path(
             client_stream,
@@ -769,6 +792,16 @@ async fn handle_http_forward(
             client_stream.shutdown().await?;
             return Ok(ClientConnectionAction::Close);
         }
+        OutboundRequestDecision::RespondResource(replacement) => {
+            write_resource_replacement_response(
+                client_stream,
+                &replacement,
+                !request.method.eq_ignore_ascii_case("HEAD"),
+            )
+            .await?;
+            client_stream.shutdown().await?;
+            return Ok(ClientConnectionAction::Close);
+        }
         OutboundRequestDecision::Close => {
             client_stream.shutdown().await?;
             return Ok(ClientConnectionAction::Close);
@@ -838,10 +871,8 @@ async fn handle_http_forward(
         }
         let forward_target =
             resolve_forward_target(&state.upstreams, &uri, prepared.upstream_id.as_deref())?;
-        let can_reuse_upstream = prepared.upstream_id.is_none()
-            && upgrade_request.is_none()
-            && request_method_can_reuse_upstream(&request.method)
-            && matches!(&body_mode, RequestBodyForwardMode::None);
+        let can_reuse_upstream =
+            plain_http_can_reuse_upstream(&request.method, upgrade_request.as_deref(), &body_mode);
         let request_body_len = match &body_mode {
             RequestBodyForwardMode::StreamingContentLength { content_length, .. } => {
                 Some(*content_length)
@@ -869,6 +900,15 @@ async fn handle_http_forward(
                     request_body_len,
                 )?
             };
+        let origin_health_host = if prepared.upstream_id.is_none() {
+            uri.host().or_else(|| {
+                prepared.headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("host").then_some(value.as_str())
+                })
+            })
+        } else {
+            None
+        };
         let connected_upstream = take_or_connect_upstream(
             client_context,
             &forward_target,
@@ -877,7 +917,8 @@ async fn handle_http_forward(
             prepared.observe_traffic,
             &prepared.traffic_host,
             &state,
-            prepared.upstream_id.is_none(),
+            true,
+            origin_health_host,
         )
         .await?;
         let mut upstream_stream = connected_upstream.stream;
@@ -903,7 +944,8 @@ async fn handle_http_forward(
                 prepared.observe_traffic,
                 &prepared.traffic_host,
                 &state,
-                prepared.upstream_id.is_none(),
+                true,
+                origin_health_host,
             )
             .await?;
             response_head_result = send_http_forward_request_and_read_response_head(
@@ -1080,7 +1122,8 @@ async fn handle_http_forward(
                 &state.user_script_registry,
                 &mut response_headers,
                 response_body,
-            )?;
+            )
+            .await?;
 
             if state.config.logging.log_response_body {
                 log_response_body(
@@ -1500,6 +1543,16 @@ fn should_keep_upstream_connection_alive(
         && !header_has_token(&response.headers, "connection", "close")
 }
 
+fn plain_http_can_reuse_upstream(
+    method: &str,
+    upgrade_request: Option<&str>,
+    body_mode: &RequestBodyForwardMode,
+) -> bool {
+    upgrade_request.is_none()
+        && request_method_can_reuse_upstream(method)
+        && matches!(body_mode, RequestBodyForwardMode::None)
+}
+
 fn request_method_can_reuse_upstream(method: &str) -> bool {
     method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD")
 }
@@ -1529,6 +1582,7 @@ async fn take_or_connect_upstream(
     traffic_host: &str,
     state: &ProxyAppState,
     use_relaygate_dns: bool,
+    origin_health_host: Option<&str>,
 ) -> Result<ConnectedUpstream> {
     if can_reuse_upstream {
         if let Some(reusable) = client_context.reusable_upstream.take() {
@@ -1553,6 +1607,7 @@ async fn take_or_connect_upstream(
         traffic_host,
         state,
         use_relaygate_dns,
+        origin_health_host,
     )
     .await?;
     Ok(ConnectedUpstream {
@@ -1579,12 +1634,30 @@ async fn connect_upstream(
     traffic_host: &str,
     state: &ProxyAppState,
     use_relaygate_dns: bool,
+    origin_health_host: Option<&str>,
 ) -> Result<TcpStream> {
     let connection = time::timeout(UPSTREAM_CONNECT_TIMEOUT, async {
         let addresses =
             resolve_target_addresses(forward_target, &state.dns_resolver, use_relaygate_dns)
                 .await?;
-        connect_happy_eyeballs(forward_target, addresses, HAPPY_EYEBALLS_DELAY).await
+        let result =
+            connect_happy_eyeballs(forward_target, addresses.clone(), HAPPY_EYEBALLS_DELAY).await;
+        if let Some(host) = origin_health_host {
+            match &result {
+                Ok(connection) => {
+                    state.dns_resolver.record_origin_connect_attempt(
+                        host,
+                        &connection.failed_addrs,
+                        Some(connection.selected_addr.ip()),
+                        Some(connection.connect_ms()),
+                    );
+                }
+                Err(_) => state
+                    .dns_resolver
+                    .record_origin_connect_attempt(host, &addresses, None, None),
+            }
+        }
+        result
     })
     .await
     .with_context(|| {
@@ -1609,7 +1682,6 @@ async fn connect_upstream(
         request_type = "http_forward",
         "Happy Eyeballs selected upstream address"
     );
-
     let upstream_stream = connection.stream;
     if let Err(error) = upstream_stream.set_nodelay(true) {
         debug!(
@@ -2117,6 +2189,16 @@ async fn handle_gateway_mount(
             client_stream.shutdown().await?;
             return Ok(());
         }
+        OutboundRequestDecision::RespondResource(replacement) => {
+            write_resource_replacement_response(
+                client_stream,
+                &replacement,
+                !request.method.eq_ignore_ascii_case("HEAD"),
+            )
+            .await?;
+            client_stream.shutdown().await?;
+            return Ok(());
+        }
         OutboundRequestDecision::Close => {
             client_stream.shutdown().await?;
             return Ok(());
@@ -2159,6 +2241,7 @@ async fn handle_gateway_mount(
             &state.upstreams,
             &state.dns_resolver,
             prepared.upstream_id.as_deref(),
+            &state.gateway_http_client_cache,
         )?;
         let mut outbound = client.request(
             reqwest::Method::from_bytes(request.method.as_bytes())?,
@@ -2185,6 +2268,14 @@ async fn handle_gateway_mount(
                 return Err(anyhow::Error::from(error));
             }
         };
+        if prepared.upstream_id.is_none() {
+            if let Some(remote_addr) = upstream_response.remote_addr() {
+                state.dns_resolver.record_origin_connect_success_observed(
+                    &prepared.traffic_host,
+                    remote_addr.ip(),
+                );
+            }
+        }
         let status = upstream_response.status();
         let mut response_headers = upstream_response.headers().clone();
         let response_header_pairs = header_pairs_from_reqwest(&response_headers);
@@ -2291,7 +2382,8 @@ async fn handle_gateway_mount(
             &state.user_script_registry,
             &mut response_headers,
             response_body,
-        )?;
+        )
+        .await?;
 
         let content_type = response_headers
             .get(CONTENT_TYPE)
@@ -2428,7 +2520,14 @@ async fn read_limited_response_body(
     }
 
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    loop {
+        let next_chunk = time::timeout(UPSTREAM_BODY_IDLE_TIMEOUT, response.chunk())
+            .await
+            .context("timed out reading gateway upstream response body")??;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
+
         if body.len().saturating_add(chunk.len()) > max_bytes {
             return Ok(None);
         }
@@ -2439,17 +2538,15 @@ async fn read_limited_response_body(
 }
 
 fn find_gateway_mount(
-    config: &RelayGateConfig,
+    registry: &SharedGatewayMountRegistry,
     request_path: &str,
 ) -> Option<crate::config::MountSiteConfig> {
     let lookup_path = mount_lookup_path(request_path);
-    if lookup_path.starts_with('/') {
-        if let Ok(config) = RelayGateConfig::load_default() {
-            return config.find_mount_by_path(&lookup_path).cloned();
-        }
+    if !lookup_path.starts_with('/') {
+        return None;
     }
 
-    config.find_mount_by_path(&lookup_path).cloned()
+    gateway_mount::find_by_path(registry, &lookup_path)
 }
 
 fn mount_lookup_path(request_target: &str) -> String {
@@ -2566,6 +2663,35 @@ mod tests {
         assert!(request_method_can_reuse_upstream("GET"));
         assert!(request_method_can_reuse_upstream("HEAD"));
         assert!(!request_method_can_reuse_upstream("POST"));
+    }
+
+    #[test]
+    fn plain_http_upstream_reuse_allows_safe_empty_requests() {
+        assert!(plain_http_can_reuse_upstream(
+            "GET",
+            None,
+            &RequestBodyForwardMode::None,
+        ));
+        assert!(plain_http_can_reuse_upstream(
+            "HEAD",
+            None,
+            &RequestBodyForwardMode::None,
+        ));
+        assert!(!plain_http_can_reuse_upstream(
+            "GET",
+            Some("websocket"),
+            &RequestBodyForwardMode::None,
+        ));
+        let streaming_body = RequestBodyForwardMode::StreamingContentLength {
+            content_length: 1,
+            prebuffered_body: Vec::new(),
+            expect_100_continue: false,
+        };
+        assert!(!plain_http_can_reuse_upstream(
+            "POST",
+            None,
+            &streaming_body,
+        ));
     }
 
     #[tokio::test]

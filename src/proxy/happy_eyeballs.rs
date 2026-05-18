@@ -14,6 +14,7 @@ pub(crate) struct HappyEyeballsConnectResult {
     pub(crate) selected_addr: SocketAddr,
     pub(crate) connect_elapsed: Duration,
     pub(crate) delay: Duration,
+    pub(crate) failed_addrs: Vec<SocketAddr>,
 }
 
 impl HappyEyeballsConnectResult {
@@ -79,6 +80,7 @@ pub(crate) async fn connect_happy_eyeballs(
     drop(tx);
 
     let mut errors = Vec::new();
+    let mut failed_addrs = Vec::new();
     while let Some((address, result)) = rx.recv().await {
         match result {
             Ok(stream) => {
@@ -90,9 +92,13 @@ pub(crate) async fn connect_happy_eyeballs(
                     selected_addr: address,
                     connect_elapsed: started_at.elapsed(),
                     delay,
+                    failed_addrs,
                 });
             }
-            Err(error) => errors.push(format!("{address}: {error}")),
+            Err(error) => {
+                failed_addrs.push(address);
+                errors.push(format!("{address}: {error}"));
+            }
         }
     }
 
@@ -107,6 +113,7 @@ pub(crate) async fn connect_happy_eyeballs(
 }
 
 fn interleave_address_families(addresses: &mut Vec<SocketAddr>) {
+    let prefer_ipv4 = addresses.first().map(SocketAddr::is_ipv4).unwrap_or(false);
     let v6 = addresses
         .iter()
         .copied()
@@ -120,11 +127,20 @@ fn interleave_address_families(addresses: &mut Vec<SocketAddr>) {
 
     addresses.clear();
     for index in 0..v6.len().max(v4.len()) {
-        if let Some(address) = v6.get(index) {
-            addresses.push(*address);
-        }
-        if let Some(address) = v4.get(index) {
-            addresses.push(*address);
+        if prefer_ipv4 {
+            if let Some(address) = v4.get(index) {
+                addresses.push(*address);
+            }
+            if let Some(address) = v6.get(index) {
+                addresses.push(*address);
+            }
+        } else {
+            if let Some(address) = v6.get(index) {
+                addresses.push(*address);
+            }
+            if let Some(address) = v4.get(index) {
+                addresses.push(*address);
+            }
         }
     }
 }
@@ -134,12 +150,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interleaves_ipv6_and_ipv4_addresses() {
+    fn interleaves_with_ipv4_first_when_dns_order_prefers_ipv4() {
         let mut addresses = vec![
             "192.0.2.1:443".parse().unwrap(),
             "192.0.2.2:443".parse().unwrap(),
             "[2001:db8::1]:443".parse().unwrap(),
             "[2001:db8::2]:443".parse().unwrap(),
+        ];
+
+        interleave_address_families(&mut addresses);
+
+        assert!(addresses[0].is_ipv4());
+        assert!(addresses[1].is_ipv6());
+        assert!(addresses[2].is_ipv4());
+        assert!(addresses[3].is_ipv6());
+    }
+
+    #[test]
+    fn interleaves_with_ipv6_first_when_dns_order_prefers_ipv6() {
+        let mut addresses = vec![
+            "[2001:db8::1]:443".parse().unwrap(),
+            "[2001:db8::2]:443".parse().unwrap(),
+            "192.0.2.1:443".parse().unwrap(),
+            "192.0.2.2:443".parse().unwrap(),
         ];
 
         interleave_address_families(&mut addresses);

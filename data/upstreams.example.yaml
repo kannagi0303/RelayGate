@@ -1,9 +1,0 @@
-upstreams:
-- id: upstream-127-0-0-1-3128
-  address: http://127.0.0.1:3128
-  enabled: true
-upstream_routes:
-- id: route-example-com
-  host_pattern: "*.example.com"
-  upstream_id: upstream-127-0-0-1-3128
-  enabled: true

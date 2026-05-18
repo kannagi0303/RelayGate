@@ -1,3 +1,9 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
 use anyhow::{Context, Result};
 use axum::http::Uri;
 use reqwest::{
@@ -5,6 +11,8 @@ use reqwest::{
     Client, Proxy,
 };
 use tracing::info;
+
+const GATEWAY_REQWEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 use crate::{
     adblock::{self, SharedAdblockState},
@@ -18,7 +26,7 @@ use crate::{
         rules::RuleEffect,
         upstream::SharedUpstreamRegistry,
     },
-    rewrite::SharedRewriteRegistry,
+    rewrite::{apply_matching_rule_shared, SharedRewriteRegistry},
     user_script::SharedUserScriptRegistry,
 };
 
@@ -55,28 +63,61 @@ pub(crate) fn build_gateway_request_headers(
     headers
 }
 
+pub(crate) type SharedGatewayHttpClientCache = Arc<Mutex<HashMap<String, Client>>>;
+
+pub(crate) fn shared_gateway_http_client_cache() -> SharedGatewayHttpClientCache {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn build_gateway_http_client(
     upstreams: &SharedUpstreamRegistry,
     dns_resolver: &SharedDnsResolver,
     upstream_id: Option<&str>,
+    client_cache: &SharedGatewayHttpClientCache,
 ) -> Result<Client> {
-    let mut builder = Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .dns_resolver(std::sync::Arc::new(ReqwestDnsResolver::new(
-            dns_resolver.clone(),
-        )));
-
-    if let Some(upstream_id) = upstream_id {
+    let upstream_address = if let Some(upstream_id) = upstream_id {
         let registry = upstreams
             .read()
             .map_err(|_| anyhow::anyhow!("upstream registry lock poisoned"))?;
-        let upstream = registry
-            .resolve(upstream_id)
-            .with_context(|| format!("upstream `{upstream_id}` not found or disabled"))?;
-        builder = builder.proxy(Proxy::all(&upstream.address)?);
+        Some(
+            registry
+                .resolve(upstream_id)
+                .with_context(|| format!("upstream `{upstream_id}` not found or disabled"))?
+                .address
+                .clone(),
+        )
+    } else {
+        None
+    };
+
+    let cache_key = format!(
+        "upstream={}",
+        upstream_address.as_deref().unwrap_or("direct")
+    );
+    if let Some(client) = client_cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("gateway HTTP client cache lock poisoned"))?
+        .get(&cache_key)
+        .cloned()
+    {
+        return Ok(client);
     }
 
-    Ok(builder.build()?)
+    let mut builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(GATEWAY_REQWEST_CONNECT_TIMEOUT)
+        .dns_resolver(Arc::new(ReqwestDnsResolver::new(dns_resolver.clone())));
+
+    if let Some(upstream_address) = &upstream_address {
+        builder = builder.proxy(Proxy::all(upstream_address)?);
+    }
+
+    let client = builder.build()?;
+    client_cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("gateway HTTP client cache lock poisoned"))?
+        .insert(cache_key, client.clone());
+    Ok(client)
 }
 
 pub(crate) fn should_forward_gateway_header(name: &str) -> bool {
@@ -103,7 +144,7 @@ pub(crate) fn header_pairs_from_reqwest(headers: &HeaderMap) -> Vec<(String, Str
         .collect()
 }
 
-pub(crate) fn apply_site_specific_gateway_rewrite(
+pub(crate) async fn apply_site_specific_gateway_rewrite(
     rewrite_registry: &SharedRewriteRegistry,
     adblock_state: &SharedAdblockState,
     target_url: &str,
@@ -138,12 +179,8 @@ pub(crate) fn apply_site_specific_gateway_rewrite(
         return Ok(response_body);
     }
 
-    let render_result = {
-        let registry = rewrite_registry
-            .read()
-            .map_err(|_| anyhow::anyhow!("rewrite registry lock poisoned"))?;
-        registry.apply_matching_rule(&response_body, target_url)?
-    };
+    let render_result =
+        apply_matching_rule_shared(rewrite_registry, &response_body, target_url).await?;
     let csp_directives = adblock::csp_directives_for_request(
         adblock_state,
         target_url,
@@ -166,7 +203,8 @@ pub(crate) fn apply_site_specific_gateway_rewrite(
             } else {
                 Some(false)
             },
-        );
+        )
+        .await;
         let injected = injection.injected();
         (injection.body, injected)
     };

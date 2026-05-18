@@ -24,8 +24,6 @@ fn main() {
     println!("cargo:rerun-if-changed=frontend/.relaygate-build-stamp");
     println!("cargo:rerun-if-env-changed=RELAYGATE_SKIP_WEB_BUILD");
     emit_rerun_for_dir(Path::new("frontend/src"));
-    println!("cargo:rerun-if-changed=data");
-    println!("cargo:rerun-if-changed=relaygate.yaml");
 
     if let Err(error) = build_web_assets() {
         panic!("failed to build RelayGate web assets: {error}");

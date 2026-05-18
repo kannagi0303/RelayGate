@@ -15,3 +15,5 @@ pub mod routes;
 pub mod server;
 pub mod system_actions;
 pub mod ui_assets;
+#[cfg(windows)]
+pub(crate) mod windows_cert_store;

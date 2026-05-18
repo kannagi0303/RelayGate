@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -37,8 +37,8 @@ use crate::{
         mitm_core::{
             allow_active_h3_buffered_for_request, has_browser_storage_access_header,
             mitm_response_pipeline_decision, prepare_mitm_request, process_mitm_response_body,
-            response_body_pipeline_preflight_reason, MitmLocalResponse, MitmRequestDecision,
-            MitmRequestState, MitmResponseState, PreparedMitmRequest,
+            response_body_pipeline_preflight_reason, MitmLocalResponse, MitmLocalResponseBody,
+            MitmRequestDecision, MitmRequestState, MitmResponseState, PreparedMitmRequest,
         },
         mitm_http::{
             build_https_response_bytes, build_https_target_url, connection_header_tokens,
@@ -71,6 +71,9 @@ const SLOW_MITM_BUFFER_BODY_MS: u128 = 500;
 const SLOW_MITM_REWRITE_STAGE_MS: u128 = 120;
 const MITM_WEBSOCKET_UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MITM_WEBSOCKET_UPSTREAM_RESPONSE_HEAD_TIMEOUT: Duration = Duration::from_secs(30);
+const MITM_UPSTREAM_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MITM_REQUEST_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_MITM_LEAF_CERT_CACHE_ENTRIES: usize = 2048;
 const MITM_WEBSOCKET_HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(100);
 const MITM_STREAM_BUFFER_BYTES: usize = 64 * 1024;
 const MITM_REQUEST_BODY_PIPE_BYTES: usize = 256 * 1024;
@@ -99,7 +102,7 @@ pub struct MitmEngine {
     dns_resolver: SharedDnsResolver,
     user_script_registry: SharedUserScriptRegistry,
     protocol_runtime: ProtocolRuntimeConfig,
-    cert_cache: Arc<Mutex<HashMap<String, GeneratedLeafCert>>>,
+    cert_cache: Arc<Mutex<MitmLeafCertCache>>,
     http_client_cache: Arc<Mutex<HashMap<String, Client>>>,
 }
 
@@ -115,6 +118,40 @@ enum MitmRequestBodyForwardMode {
         prebuffered_body: Vec<u8>,
         expect_100_continue: bool,
     },
+}
+
+#[derive(Default)]
+struct MitmLeafCertCache {
+    entries: HashMap<String, GeneratedLeafCert>,
+    lru: VecDeque<String>,
+}
+
+impl MitmLeafCertCache {
+    fn get(&mut self, cache_key: &str) -> Option<GeneratedLeafCert> {
+        let cached = self.entries.get(cache_key).cloned()?;
+        self.touch(cache_key);
+        Some(cached)
+    }
+
+    fn insert(&mut self, cache_key: String, cert: GeneratedLeafCert) {
+        self.entries.insert(cache_key.clone(), cert);
+        self.touch(&cache_key);
+        self.prune_to_limit();
+    }
+
+    fn touch(&mut self, cache_key: &str) {
+        self.lru.retain(|key| key != cache_key);
+        self.lru.push_back(cache_key.to_string());
+    }
+
+    fn prune_to_limit(&mut self) {
+        while self.entries.len() > MAX_MITM_LEAF_CERT_CACHE_ENTRIES {
+            let Some(oldest) = self.lru.pop_front() else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
 }
 
 impl MitmRequestBodyForwardMode {
@@ -220,6 +257,25 @@ mod tests {
             &patterns
         ));
     }
+
+    #[test]
+    fn h3_active_direct_path_requires_direct_auto_policy() {
+        assert!(h3_active_direct_path_allowed(
+            &MitmUpstreamRequestIntent::new(None, MitmUpstreamProtocolPolicy::Auto,)
+        ));
+        assert!(!h3_active_direct_path_allowed(
+            &MitmUpstreamRequestIntent::new(
+                Some("osaka".to_string()),
+                MitmUpstreamProtocolPolicy::Auto,
+            )
+        ));
+        assert!(!h3_active_direct_path_allowed(
+            &MitmUpstreamRequestIntent::new(None, MitmUpstreamProtocolPolicy::Http1Only,)
+        ));
+        assert!(!h3_active_direct_path_allowed(
+            &MitmUpstreamRequestIntent::new(None, MitmUpstreamProtocolPolicy::Http2PriorKnowledge,)
+        ));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -305,6 +361,20 @@ fn request_is_websocket_upgrade(request: &crate::proxy::mitm_http::ParsedMitmHtt
         && request_header_value(request, "upgrade")
             .map(|value| value.eq_ignore_ascii_case("websocket"))
             .unwrap_or(false)
+}
+
+fn h3_active_direct_path_allowed(
+    upstream: &crate::proxy::mitm_upstream::MitmUpstreamRequestIntent,
+) -> bool {
+    // Active H3 currently opens a direct QUIC connection to the origin. If a
+    // request is routed through a RelayGate upstream proxy, or if the upstream
+    // protocol policy explicitly asks for H1/H2, taking the active H3 path would
+    // no longer be semantically equivalent to the established reqwest path.
+    upstream.upstream_id.is_none()
+        && matches!(
+            upstream.protocol_policy,
+            crate::proxy::mitm_upstream::MitmUpstreamProtocolPolicy::Auto
+        )
 }
 
 fn mitm_passthrough_host_matches(authority_or_host: &str, patterns: &[String]) -> bool {
@@ -660,13 +730,45 @@ fn response_buffer_limit_response_bytes() -> Vec<u8> {
     )
 }
 
-fn local_mitm_response_bytes(response: MitmLocalResponse) -> Vec<u8> {
-    simple_http_response_bytes_with_content_type(
-        response.status_code,
-        response.reason_phrase,
-        &response.content_type,
-        &response.body,
-    )
+async fn write_local_mitm_response<W>(
+    writer: &mut W,
+    response: MitmLocalResponse,
+    include_body: bool,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match response.body {
+        MitmLocalResponseBody::Bytes(body) => {
+            if include_body {
+                let response_bytes = simple_http_response_bytes_with_content_type(
+                    response.status_code,
+                    response.reason_phrase,
+                    &response.content_type,
+                    &body,
+                );
+                writer.write_all(&response_bytes).await?;
+            } else {
+                let response_head = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.status_code,
+                    response.reason_phrase,
+                    response.content_type,
+                    body.len(),
+                );
+                writer.write_all(response_head.as_bytes()).await?;
+            }
+        }
+        MitmLocalResponseBody::Resource(replacement) => {
+            crate::proxy::local_response::write_resource_replacement_response(
+                writer,
+                &replacement,
+                include_body,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 fn websocket_request_target(request_uri: &str) -> String {
@@ -817,10 +919,9 @@ async fn connect_mitm_websocket_tcp(
 ) -> Result<TcpStream> {
     if let Some(upstream_address) = upstream_address {
         let upstream_target = upstream_proxy_target(upstream_address)?;
-        let addresses = tokio::net::lookup_host(&upstream_target)
+        let addresses = resolve_target_addresses(&upstream_target, dns_resolver, true)
             .await
-            .with_context(|| format!("failed to resolve upstream proxy `{upstream_target}`"))?
-            .collect::<Vec<_>>();
+            .with_context(|| format!("failed to resolve upstream proxy `{upstream_target}`"))?;
         let connection = connect_happy_eyeballs(
             &upstream_target,
             addresses,
@@ -852,10 +953,25 @@ async fn connect_mitm_websocket_tcp(
 
     let target = format!("{target_host}:{target_port}");
     let addresses = resolve_target_addresses(&target, dns_resolver, true).await?;
+    let result = connect_happy_eyeballs(
+        &target,
+        addresses.clone(),
+        MITM_WEBSOCKET_HAPPY_EYEBALLS_DELAY,
+    )
+    .await;
+    match &result {
+        Ok(connection) => {
+            dns_resolver.record_origin_connect_attempt(
+                target_host,
+                &connection.failed_addrs,
+                Some(connection.selected_addr.ip()),
+                Some(connection.connect_ms()),
+            );
+        }
+        Err(_) => dns_resolver.record_origin_connect_attempt(target_host, &addresses, None, None),
+    }
     let connection =
-        connect_happy_eyeballs(&target, addresses, MITM_WEBSOCKET_HAPPY_EYEBALLS_DELAY)
-            .await
-            .with_context(|| format!("failed to connect WebSocket upstream `{target}`"))?;
+        result.with_context(|| format!("failed to connect WebSocket upstream `{target}`"))?;
     Ok(connection.stream)
 }
 
@@ -864,7 +980,14 @@ async fn read_limited_response_body(
     max_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
     let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
+    loop {
+        let next_chunk = time::timeout(MITM_UPSTREAM_BODY_IDLE_TIMEOUT, response.chunk())
+            .await
+            .context("timed out reading MITM upstream response body")??;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
+
         if body.len().saturating_add(chunk.len()) > max_bytes {
             return Ok(None);
         }
@@ -991,7 +1114,12 @@ where
     while forwarded < content_length {
         let remaining = content_length - forwarded;
         let read_len = remaining.min(buffer.len());
-        let read_count = client_stream.read(&mut buffer[..read_len]).await?;
+        let read_count = time::timeout(
+            MITM_REQUEST_BODY_IDLE_TIMEOUT,
+            client_stream.read(&mut buffer[..read_len]),
+        )
+        .await
+        .context("timed out reading MITM streaming request body from client")??;
         if read_count == 0 {
             bail!("client closed before completing MITM streaming request body");
         }
@@ -1133,7 +1261,12 @@ where
     S: AsyncRead + Unpin,
 {
     let mut temp = vec![0_u8; MITM_STREAM_BUFFER_BYTES];
-    let read_count = client_stream.read(&mut temp).await?;
+    let read_count = time::timeout(
+        MITM_REQUEST_BODY_IDLE_TIMEOUT,
+        client_stream.read(&mut temp),
+    )
+    .await
+    .context("timed out reading MITM streaming chunked request body from client")??;
     if read_count == 0 {
         bail!("client closed before completing MITM streaming chunked request body");
     }
@@ -1295,7 +1428,7 @@ impl MitmEngine {
             dns_resolver,
             user_script_registry,
             protocol_runtime,
-            cert_cache: Arc::new(Mutex::new(HashMap::new())),
+            cert_cache: Arc::new(Mutex::new(MitmLeafCertCache::default())),
             http_client_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1327,6 +1460,10 @@ impl MitmEngine {
 
     pub(crate) fn traffic_state(&self) -> &SharedTrafficState {
         &self.traffic_state
+    }
+
+    pub(crate) fn dns_resolver(&self) -> &SharedDnsResolver {
+        &self.dns_resolver
     }
 
     pub(crate) fn status_endpoint_enabled(&self) -> bool {
@@ -1608,8 +1745,12 @@ impl MitmEngine {
                 &target_url,
                 negotiated_alpn_label,
             );
-            let response = local_mitm_response_bytes(response);
-            tls_stream.write_all(&response).await?;
+            write_local_mitm_response(
+                tls_stream,
+                response,
+                !request.method.eq_ignore_ascii_case("HEAD"),
+            )
+            .await?;
             close_request!("relaygate_downstream_status");
         }
 
@@ -1622,8 +1763,12 @@ impl MitmEngine {
         )? {
             MitmRequestDecision::Continue(prepared_request) => prepared_request,
             MitmRequestDecision::Respond { response, reason } => {
-                let response = local_mitm_response_bytes(response);
-                tls_stream.write_all(&response).await?;
+                write_local_mitm_response(
+                    tls_stream,
+                    response,
+                    !request.method.eq_ignore_ascii_case("HEAD"),
+                )
+                .await?;
                 close_request!(reason);
             }
             MitmRequestDecision::Close { reason } => {
@@ -1743,6 +1888,7 @@ impl MitmEngine {
                     && request.body.is_empty();
 
             let protocol_snapshot = self.protocol_snapshot();
+            let h3_direct_path_allowed = h3_active_direct_path_allowed(&prepared_request.upstream);
             let response_state = self.mitm_response_state();
             let browser_storage_access_request =
                 has_browser_storage_access_header(&prepared_request.headers);
@@ -1758,7 +1904,8 @@ impl MitmEngine {
                 request_type,
                 &response_rule_preview.effects,
             );
-            if protocol_snapshot.upstream_http3_buffered_enabled
+            if h3_direct_path_allowed
+                && protocol_snapshot.upstream_http3_buffered_enabled
                 && !browser_storage_access_request
                 && allow_active_h3_buffered_for_request(
                     &response_state,
@@ -1980,7 +2127,8 @@ impl MitmEngine {
             // until a real end-to-end H1 streaming writer owns both the upstream
             // response and downstream byte pump.
 
-            if !protocol_snapshot.upstream_http3_buffered_enabled
+            if h3_direct_path_allowed
+                && !protocol_snapshot.upstream_http3_buffered_enabled
                 && !protocol_snapshot.upstream_http3_streaming_enabled
                 && protocol_snapshot.upstream_http3_probe_enabled
             {
@@ -2132,6 +2280,15 @@ impl MitmEngine {
                     return Err(error);
                 }
             };
+            if upstream.upstream_id.is_none() {
+                if let Some(remote_addr) = upstream_response.remote_addr() {
+                    self.dns_resolver.record_origin_connect_success_observed(
+                        &prepared_request.traffic_host,
+                        remote_addr.ip(),
+                    );
+                }
+            }
+
             downstream_status::record_upstream_response(
                 &prepared_request.traffic_host,
                 &target_url,
@@ -2376,6 +2533,7 @@ impl MitmEngine {
                 response_body,
                 &response_decision.effects,
             )
+            .await
             .with_context(|| {
                 format!(
                     "failed to process MITM response body for {}",
@@ -2778,7 +2936,7 @@ impl MitmEngine {
             .map_err(|_| anyhow::anyhow!("failed to acquire MITM certificate cache lock"))?;
 
         if let Some(cached) = cache.get(&cache_key) {
-            return Ok(cached.clone());
+            return Ok(cached);
         }
 
         let generated = generate_leaf_certificate(&ca, &host, port, &cache_key)?;

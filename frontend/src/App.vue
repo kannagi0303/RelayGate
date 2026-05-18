@@ -10,12 +10,14 @@ const { t } = useI18n();
 
 onMounted(() => {
   backend.connect();
+  void backend.refreshSnapshot();
 });
 
 watch(
   () => route.fullPath,
   () => {
     backend.clearFeedback();
+    void backend.refreshSnapshot();
   },
 );
 
@@ -41,6 +43,7 @@ const navGroups: NavGroup[] = [
     titleKey: "nav.connection_routing",
     items: [
       { to: "/dns", label: "nav.dns" },
+      { to: "/connection-info", label: "nav.connection_info" },
       { to: "/upstreams", label: "nav.upstreams" },
       { to: "/upstream-routes", label: "nav.upstream_routes" },
       { to: "/gateway", label: "nav.gateway" },

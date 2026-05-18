@@ -1,10 +1,13 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use reqwest::Client;
+
+const MITM_REQWEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 use crate::{
     config::UpstreamProtocolPolicyConfig,
@@ -325,7 +328,6 @@ impl MitmUpstreamConnector {
     pub(crate) async fn try_http3_streaming_response_for_mitm_parts(
         &self,
         streaming_response_enabled: bool,
-        downstream_protocol: &str,
         method: &str,
         target_url: &str,
         authority: &str,
@@ -352,15 +354,6 @@ impl MitmUpstreamConnector {
                 authority,
                 attempt_plan,
                 backend_error.clone(),
-            );
-            upstream_h3::record_http3_active_streaming_writer_fallback(
-                downstream_protocol,
-                authority,
-                candidate.as_ref(),
-                None,
-                None,
-                backend_error.kind.code(),
-                backend_error.detail,
             );
             return Some(Err(outcome));
         }
@@ -393,15 +386,6 @@ impl MitmUpstreamConnector {
                     attempt_plan,
                     backend_error.clone(),
                 );
-                upstream_h3::record_http3_active_streaming_writer_fallback(
-                    downstream_protocol,
-                    authority,
-                    candidate.as_ref(),
-                    None,
-                    None,
-                    backend_error.kind.code(),
-                    backend_error.detail,
-                );
                 return Some(Err(outcome));
             }
         };
@@ -412,30 +396,12 @@ impl MitmUpstreamConnector {
             .execute_request_streaming_response(&self.dns_resolver, &request)
             .await
         {
-            Ok(response) => {
-                upstream_h3::record_http3_active_streaming_writer_ready(
-                    downstream_protocol,
-                    authority,
-                    attempt_plan.h3_candidate.as_ref(),
-                    response.status_code(),
-                    response.header_count(),
-                );
-                Some(Ok(response))
-            }
+            Ok(response) => Some(Ok(response)),
             Err(error) => {
                 let outcome = UpstreamHttp3ExecutionOutcome::fallback_to_reqwest(
                     authority,
                     attempt_plan,
                     error.clone(),
-                );
-                upstream_h3::record_http3_active_streaming_writer_fallback(
-                    downstream_protocol,
-                    authority,
-                    outcome.attempt_plan.h3_candidate.as_ref(),
-                    None,
-                    None,
-                    error.kind.code(),
-                    error.detail,
                 );
                 Some(Err(outcome))
             }
@@ -527,6 +493,7 @@ impl MitmUpstreamConnector {
 
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(MITM_REQWEST_CONNECT_TIMEOUT)
             .dns_resolver(Arc::new(ReqwestDnsResolver::new(self.dns_resolver.clone())));
         if plan.allow_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
